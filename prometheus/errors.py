@@ -1,0 +1,2 @@
+class PrometheusError(Exception):
+    pass

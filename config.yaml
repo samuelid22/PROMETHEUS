@@ -1,0 +1,19 @@
+sampling:
+  strategy: uniform
+  frame_count: 8
+  interval_seconds: 1.0
+  max_frames: 16
+  image_format: jpg
+  image_quality: 2
+
+segmentation:
+  scene_threshold: 0.3
+  min_scene_duration: 1.0
+  max_scenes: 12
+  frames_per_scene: 2
+
+analyzer:
+  provider: mock
+
+output:
+  directory: output

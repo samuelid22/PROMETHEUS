@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: prometheus-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: PROMETHEUS_PROVIDER
+        value: gemini
+      - key: PROMETHEUS_NIMIQ_NETWORK
+        value: testnet
+      - key: PROMETHEUS_NIMIQ_CONFIRMATIONS
+        value: "1"
+      - key: PROMETHEUS_NIMIQ_AMOUNT_LUNA
+        value: "1000000"
+      - key: PROMETHEUS_API_OUTPUT_DIR
+        value: /tmp/prometheus-output
+      - key: PROMETHEUS_API_UPLOAD_DIR
+        value: /tmp/prometheus-uploads
+      - key: PROMETHEUS_PAYMENT_DB
+        value: /tmp/prometheus-payments.db
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PROMETHEUS_CORS_ORIGINS
+        sync: false
+      - key: PROMETHEUS_NIMIQ_RECIPIENT
+        sync: false
+      - key: PROMETHEUS_NIMIQ_RPC_URL
+        sync: false

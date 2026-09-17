@@ -1,0 +1,37 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+.vscode/
+.idea/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependency, cache, coverage, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage/
+node_modules/
+web_dist/
+dist/
+
+# Runtime data, local media, and logs
+output/
+api_output/
+uploads/
+samples/
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Local-only project notes
+CODEX_HANDOFF.md

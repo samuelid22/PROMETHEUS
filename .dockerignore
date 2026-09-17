@@ -1,0 +1,16 @@
+.git
+.venv
+.vscode
+.env
+.env.*
+node_modules
+web_dist
+__pycache__
+.pytest_cache
+api_output
+output
+uploads
+samples
+*.pyc
+*.pyo
+*.db

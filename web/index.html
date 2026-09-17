@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#090b14">
+<title>Prometheus — Creative video intelligence</title>
+<link rel="icon" href="/prometheus-mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#screen-upload" aria-label="Prometheus home">
+    <prometheus-logo class="brand-logo" variant="primary"></prometheus-logo>
+  </a>
+  <div class="topbar-meta">
+    <span class="tagline">Creative video intelligence</span>
+    <span class="mini-app-badge" title="Nimiq Pay Mini App"><span aria-hidden="true">✦</span> Nimiq Pay</span>
+  </div>
+</header>
+
+<main class="container">
+
+  <section id="screen-upload" class="screen" tabindex="-1">
+    <div class="hero hero-upload">
+      <p class="eyebrow">Creative intelligence studio</p>
+      <h1>Find the visual language behind a video.</h1>
+      <p class="sub">Upload a clip and Prometheus turns its scenes, style, camera, and atmosphere into a creative recipe you can explore and remix.</p>
+    </div>
+
+    <div class="upload-shell">
+      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Choose a video file">
+        <div class="upload-orb" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M16 22V7M10.5 12.5 16 7l5.5 5.5M7 24.5h18"/></svg>
+        </div>
+        <div class="dz-text"><strong>Drop your video here</strong><span>or choose a file from your device</span></div>
+        <span class="dropzone-action" aria-hidden="true">Choose video</span>
+        <input id="file-input" type="file" accept="video/mp4,.mp4,.m4v,.mov,.webm" hidden>
+      </div>
+      <div class="upload-specs" aria-label="Supported formats"><span>MP4 · MOV · WebM</span><span>Up to 200 MB</span></div>
+
+      <div id="file-card" class="file-card hidden">
+        <div class="upload-preview-wrap" aria-hidden="true">
+          <video id="upload-preview" class="upload-preview" muted playsinline preload="metadata"></video>
+          <span class="preview-play">▶</span>
+        </div>
+        <div class="file-info">
+          <p class="file-kicker">Ready to inspect</p>
+          <div class="file-name" id="file-name"></div>
+          <div class="file-meta" id="file-meta"></div>
+          <button id="file-clear" class="linkbtn" type="button">Choose a different video</button>
+        </div>
+      </div>
+    </div>
+
+    <button id="analyze-btn" class="primary block analyze-action" type="button" disabled><span>Inspect video</span><small>Free local inspection</small></button>
+    <button id="advanced-btn" class="secondary advanced-entry" type="button" disabled>Run free inspection first for advanced analysis</button>
+    <div id="payment-status" class="payment-status" role="status" aria-live="polite">Connecting to Nimiq Pay&hellip;</div>
+    <div id="upload-error" class="error hidden" role="alert"></div>
+
+    <div class="workflow" aria-label="How Prometheus works">
+      <div class="workflow-step"><span>01</span><strong>Inspect</strong><small>Read the clip</small></div>
+      <div class="workflow-step"><span>02</span><strong>Understand</strong><small>Map visual choices</small></div>
+      <div class="workflow-step"><span>03</span><strong>Rebuild</strong><small>Shape the recipe</small></div>
+      <div class="workflow-step"><span>04</span><strong>Remix</strong><small>Make it yours</small></div>
+    </div>
+  </section>
+
+  <section id="screen-processing" class="screen hidden" tabindex="-1">
+    <div class="processing-intro">
+      <div class="process-mark" aria-hidden="true"><prometheus-logo variant="compact"></prometheus-logo></div>
+      <p class="eyebrow">Analysis in progress</p>
+      <div id="phase-text" class="phase" role="status" aria-live="polite">Starting&hellip;</div>
+      <div id="phase-detail" class="phase-detail"></div>
+    </div>
+    <div class="progress" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="upload-bar" class="progress-bar"></div></div>
+    <ol id="step-list" class="steplist" aria-label="Analysis stages"></ol>
+    <p class="hint">Stages advance when the backend reports them. Analysis time depends on the video’s length and scenes.</p>
+    <div id="job-error" class="error hidden" role="alert"></div>
+    <button id="retry-btn" class="secondary hidden" type="button">Back to upload</button>
+  </section>
+
+  <section id="screen-results" class="screen hidden" tabindex="-1">
+    <div class="result-head">
+      <p class="eyebrow">Analysis complete</p>
+      <h2 id="res-title"></h2>
+      <div id="res-chips" class="chips"></div>
+      <div id="res-analyzer" class="analyzer"></div>
+    </div>
+
+    <div class="card video-card">
+      <video id="res-video" class="preview" controls playsinline preload="metadata"></video>
+    </div>
+
+    <div class="card summary-card">
+      <p class="card-overline">At a glance</p>
+      <h3>Creative summary</h3>
+      <p id="res-summary" class="summary"></p>
+    </div>
+
+    <div id="upgrade-card" class="card upgrade hidden">
+      <div class="upgrade-head"><div><p class="card-overline">Deep analysis</p><h3>Unlock the creative recipe</h3></div><span class="nim-price">10 <small>NIM</small></span></div>
+      <p>Use Nimiq Pay to add vision analysis, reconstructed prompts, and remix controls for this video.</p>
+      <button id="upgrade-btn" class="primary block" type="button">Pay 10 NIM &amp; analyze</button>
+      <p class="payment-note">One payment unlocks deep analysis for this video only.</p>
+      <div id="upgrade-error" class="error hidden" role="alert"></div>
+    </div>
+
+    <div id="prompt-card" class="card prompt-card">
+      <div class="card-head">
+        <div><p class="card-overline">01 · Creative direction</p><h3>Reconstructed prompt</h3></div>
+        <button id="copy-prompt" class="copy" type="button">Copy</button>
+      </div>
+      <pre id="res-prompt" class="prompt"></pre>
+      <button id="remix-btn" class="secondary remix-entry" type="button">Remix this creative direction <span aria-hidden="true">↗</span></button>
+    </div>
+
+    <div id="analysis-card" class="card analysis-card">
+      <div class="card-head"><div><p class="card-overline">02 · Visual system</p><h3>Creative recipe</h3></div></div>
+      <div id="res-analysis"></div>
+    </div>
+
+    <div class="card scenes-card">
+      <div class="card-head"><div><p class="card-overline">03 · Sequence</p><h3>Scene breakdown</h3></div></div>
+      <div id="res-scenes"></div>
+    </div>
+
+    <button id="again-btn" class="primary block" type="button">Analyze another video</button>
+  </section>
+
+  <section id="screen-remix" class="screen hidden" tabindex="-1">
+    <div class="result-head remix-head">
+      <p class="eyebrow">Creative controls</p>
+      <h2>Remix the recipe.</h2>
+      <p class="sub">Change the creative attributes you want. Prometheus keeps the analyzed visual language as your starting point.</p>
+    </div>
+
+    <div class="card source-card">
+      <div class="card-head">
+        <div><p class="card-overline">Source direction</p><h3>Original reconstruction</h3></div>
+        <button id="copy-original" class="copy" type="button">Copy</button>
+      </div>
+      <pre id="remix-original" class="prompt"></pre>
+    </div>
+
+    <div class="flow-label">Edit selected attributes</div>
+
+    <div class="card remix-controls">
+      <p class="remix-guidance">Leave an attribute unchanged to preserve its original treatment.</p>
+      <div id="remix-fields"></div>
+      <button id="remix-run" class="primary block" type="button">Generate remix</button>
+      <div id="remix-error" class="error hidden" role="alert"></div>
+    </div>
+
+    <div class="flow-label hidden" id="remix-flow-label">Your remixed direction</div>
+
+    <div id="remix-result" class="card hidden">
+      <div class="card-head">
+        <div><p class="card-overline">New direction</p><h3>Remixed prompt</h3></div>
+        <button id="copy-remix" class="copy" type="button">Copy</button>
+      </div>
+      <pre id="remix-prompt" class="prompt"></pre>
+    </div>
+
+    <button id="remix-back" class="secondary" type="button">Back to results</button>
+  </section>
+
+</main>
+
+<footer class="footer"><span class="footer-mark" aria-hidden="true"></span> Prometheus · creative findings are reconstruction hypotheses, not measurements.</footer>
+<script type="module" src="/logo.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,287 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { initMock } = vi.hoisted(() => ({ initMock: vi.fn() }));
+vi.mock("@nimiq/mini-app-sdk", () => ({ init: initMock }));
+
+const html = readFileSync(resolve(process.cwd(), "web/index.html"), "utf8");
+const HASH_A = "ab".repeat(32);
+const HASH_B = "cd".repeat(32);
+const RECOVERY_KEY = "prometheus.recovery.v2";
+
+class FakeXMLHttpRequest {
+  static instances = [];
+  constructor() {
+    this.upload = {};
+    FakeXMLHttpRequest.instances.push(this);
+  }
+  open(method, url) {
+    this.method = method;
+    this.url = url;
+  }
+  send(body) {
+    this.body = body;
+  }
+}
+
+function response(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+async function flush() {
+  for (let index = 0; index < 5; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+function chooseVideo(name = "clip.mp4") {
+  const input = document.getElementById("file-input");
+  Object.defineProperty(input, "files", {
+    value: [new File(["video-data"], name, { type: "video/mp4" })],
+    configurable: true,
+  });
+  input.dispatchEvent(new Event("change"));
+}
+
+async function completeBasic(id = "basic-1", index = 0) {
+  const analyze = document.getElementById("analyze-btn");
+  analyze.click();
+  expect(FakeXMLHttpRequest.instances[index].url).toBe("/api/inspect");
+  const xhr = FakeXMLHttpRequest.instances[index];
+  xhr.status = 202;
+  xhr.responseText = JSON.stringify({ job_id: id });
+  xhr.onload();
+  await flush();
+  expect(document.getElementById("screen-results").classList.contains("hidden")).toBe(false);
+  expect(document.getElementById("upgrade-btn").disabled).toBe(false);
+}
+
+function basicResult(id) {
+  return {
+    job_id: id, tier: "basic", video: { name: "clip.mp4", duration: 1, width: 320, height: 180, fps: 24 },
+    analyzer: { mode: "local" }, summary: "Basic result", scenes: [], breakdown: [], prompt_markdown: "",
+  };
+}
+
+function advancedResult(id) {
+  return {
+    job_id: id, tier: "advanced", video: { name: "clip.mp4", duration: 1, width: 320, height: 180, fps: 24 },
+    analyzer: { mode: "real", provider: "gemini", model: "test" },
+    summary: "Advanced result", scenes: [], breakdown: [], prompt_markdown: "Reconstructed prompt",
+  };
+}
+
+function mockApi({ verifyError = null } = {}) {
+  let quoteNumber = 0;
+  const quotes = new Map();
+  const fetchMock = vi.fn(async (url, options = {}) => {
+    const path = String(url);
+    if (path === "/api/payments/config") return response({ enabled: true, amount_nim: 10, network: "testnet" });
+    if (path === "/api/payments/quotes") {
+      const sourceJobId = JSON.parse(options.body).source_job_id;
+      quoteNumber += 1;
+      const id = `quote-${quoteNumber}`;
+      quotes.set(id, sourceJobId);
+      return response({ id, source_job_id: sourceJobId, token: `token-${quoteNumber}`,
+        recipient: "NQ43 TEST", amount_luna: 1_000_000, memo: `prometheus:${id}` });
+    }
+    if (path.includes("/verify")) {
+      if (verifyError) throw verifyError;
+      const quoteId = path.split("/")[4];
+      const hash = JSON.parse(options.body).tx_hash;
+      return response({ source_job_id: quotes.get(quoteId) || "basic-1", state: "verified", tx_hash: hash || HASH_A });
+    }
+    if (path === "/api/analyze") {
+      return response({ job_id: `advanced-${options.body.get("source_job_id")}` }, 202);
+    }
+    if (path.endsWith("/remix")) return response({ prompt_markdown: "Remixed prompt" });
+    if (path.startsWith("/api/jobs/") && path.endsWith("/result")) {
+      const id = path.split("/")[3];
+      return response(id.startsWith("advanced-") ? advancedResult(id) : basicResult(id));
+    }
+    if (path.startsWith("/api/jobs/")) return response({ state: "complete", stage: "Complete" });
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  globalThis.fetch = fetchMock;
+  return fetchMock;
+}
+
+describe("basic inspection and per-job payment", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    initMock.mockReset();
+    FakeXMLHttpRequest.instances = [];
+    document.open();
+    document.write(html);
+    document.close();
+    localStorage.clear();
+    globalThis.XMLHttpRequest = FakeXMLHttpRequest;
+    window.scrollTo = vi.fn();
+    HTMLElement.prototype.focus = vi.fn();
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("opens the file chooser and starts basic analysis on the first click only", async () => {
+    const provider = { isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() };
+    initMock.mockResolvedValue(provider);
+    mockApi();
+    await import("./app.js");
+    await flush();
+    const input = document.getElementById("file-input");
+    const click = vi.spyOn(input, "click");
+    document.getElementById("dropzone").click();
+    expect(click).toHaveBeenCalledTimes(1);
+    chooseVideo();
+    const analyze = document.getElementById("analyze-btn");
+    analyze.click();
+    analyze.click();
+    expect(FakeXMLHttpRequest.instances).toHaveLength(1);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("honors the first upgrade click while Nimiq is still initializing", async () => {
+    let finishInitialization;
+    initMock.mockImplementation(() => new Promise((resolve) => { finishInitialization = resolve; }));
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
+      sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_A) };
+    mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    expect(document.getElementById("upgrade-btn").disabled).toBe(true);
+    finishInitialization(provider);
+    await flush();
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+  });
+
+  it("runs basic, requests one payment, verifies its hash, shows advanced result, and remixes on one action", async () => {
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
+      sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_A) };
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    const upgrade = document.getElementById("upgrade-btn");
+    upgrade.click();
+    upgrade.click();
+    await flush();
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledWith({
+      recipient: "NQ43 TEST", value: 1_000_000, data: "prometheus:quote-1",
+    });
+    const quoteRequest = fetchMock.mock.calls.find(([url]) => url === "/api/payments/quotes");
+    expect(JSON.parse(quoteRequest[1].body).source_job_id).toBe("basic-1");
+    const verifyRequest = fetchMock.mock.calls.find(([url]) => String(url).includes("/verify"));
+    expect(JSON.parse(verifyRequest[1].body).tx_hash).toBe(HASH_A);
+    const analyzeRequest = fetchMock.mock.calls.find(([url]) => url === "/api/analyze");
+    expect(analyzeRequest[1].body.get("source_job_id")).toBe("basic-1");
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).payment).toBeNull();
+    document.getElementById("remix-btn").click();
+    document.querySelector("#remix-fields textarea").value = "dragon";
+    document.getElementById("remix-run").click();
+    await flush();
+    expect(document.getElementById("remix-prompt").textContent).toBe("Remixed prompt");
+  });
+
+  it("requires a new quote and transaction for the next video", async () => {
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
+      sendBasicTransactionWithData: vi.fn().mockResolvedValueOnce(HASH_A).mockResolvedValueOnce(HASH_B) };
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    await completeBasic("basic-1");
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    document.getElementById("again-btn").click();
+    chooseVideo("second.mp4");
+    await completeBasic("basic-2", 1);
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    const quoteCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes");
+    expect(quoteCalls).toHaveLength(2);
+    expect(JSON.parse(quoteCalls[1][1].body).source_job_id).toBe("basic-2");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears a cancelled or failed wallet request without starting advanced analysis", async () => {
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
+      sendBasicTransactionWithData: vi.fn().mockRejectedValue(Object.assign(new Error("User rejected"), { code: 4001 })) };
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("upgrade-error").textContent).toContain("Payment cancelled");
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/analyze")).toBe(false);
+    expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).payment).toBeNull();
+    provider.sendBasicTransactionWithData.mockResolvedValue({ error: { type: "InvalidTransactionError", message: "Insufficient balance" } });
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("upgrade-error").textContent).toContain("Insufficient balance");
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/analyze")).toBe(false);
+  });
+
+  it("recovers a verified payment only for its original basic job after refresh", async () => {
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify({
+      jobId: "basic-1", sourceJobId: "basic-1",
+      payment: { sourceJobId: "basic-1", quoteId: "quote-saved", token: "saved-token", txHash: HASH_A },
+    }));
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true), sendBasicTransactionWithData: vi.fn() };
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes")).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(1);
+  });
+
+  it("does not apply a saved payment to a different job", async () => {
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify({
+      jobId: "basic-2", sourceJobId: "basic-1",
+      payment: { sourceJobId: "basic-1", quoteId: "old-quote", token: "old-token", txHash: HASH_A },
+    }));
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
+      sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_B) };
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("old-quote/verify"))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes")).toHaveLength(1);
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds the same job payment through a verification interruption", async () => {
+    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
+      sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_A) };
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ verifyError: new TypeError("offline") });
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("upgrade-error").textContent).toContain("do not pay again");
+    expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).payment.sourceJobId).toBe("basic-1");
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/analyze")).toBe(false);
+  });
+});
