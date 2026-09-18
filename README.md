@@ -2,6 +2,10 @@
 
 Prometheus reverse-engineers video structure locally and can add paid Gemini vision analysis through a Nimiq Pay Mini App.
 
+**Network:** Prometheus is currently configured for Nimiq Testnet. All NIM payments in this deployment are Testnet transactions.
+
+**Testing note:** Prometheus currently uses Nimiq Testnet for all NIM payments. Please test payment functionality using the Testnet environment. No real NIM is required.
+
 ## Tiers
 
 - Free: FFmpeg metadata, scene detection, and one representative frame per scene.

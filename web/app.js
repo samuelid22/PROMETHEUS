@@ -8,6 +8,8 @@ const RECOVERY_KEY = "prometheus.recovery.v2";
 const REQUEST_TIMEOUT_MS = 15000;
 const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const CONSENSUS_ATTEMPTS = 15;
+const API_HEALTH_RETRY_MS = 2000;
+const API_HEALTH_DEADLINE_MS = 100000;
 
 const PROCESS_STEPS = [
   { id: "uploading", label: "Uploading" },
@@ -103,18 +105,25 @@ let selectedFile = null;
 let selectedPreviewUrl = null;
 let pollTimer = null;
 let recovery = readRecovery();
-let currentJobId = recovery.jobId || null;
-let sourceJobId = recovery.sourceJobId || null;
+let savedJobId = typeof recovery.jobId === "string" && recovery.jobId ? recovery.jobId : null;
+let currentJobId = null;
+let sourceJobId = typeof recovery.sourceJobId === "string" && recovery.sourceJobId
+  ? recovery.sourceJobId
+  : null;
 let currentResult = null;
 let currentRemixText = "";
 let paymentConfig = null;
 let nimiqPromise = null;
 let nimiqReady = false;
 let nimiqInitTask = null;
+let apiReady = false;
+let apiReadyTask = null;
 let pendingPayment = recovery.payment || null;
 let pollFailures = 0;
 let actionBusy = false;
 let pollingJobId = null;
+const inspectLabel = els.analyzeBtn.querySelector("span");
+const inspectDetail = els.analyzeBtn.querySelector("small");
 
 function readRecovery() {
   try {
@@ -157,6 +166,55 @@ async function fetchWithRetry(url, options = {}, attempts = 3) {
     await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
   }
   throw lastError;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function syncStartupState() {
+  els.analyzeBtn.classList.toggle("initializing", !apiReady);
+  inspectLabel.textContent = apiReady ? "Inspect video" : "Initializing";
+  inspectDetail.textContent = apiReady ? "Free local inspection" : "Analysis service waking up";
+  syncUploadButtons();
+}
+
+async function waitForApiReady() {
+  if (apiReady) return;
+  if (apiReadyTask) return apiReadyTask;
+
+  apiReadyTask = (async () => {
+    const deadline = Date.now() + API_HEALTH_DEADLINE_MS;
+    els.paymentStatus.classList.remove("ready");
+    els.paymentStatus.textContent = "Starting Prometheus… The analysis service is waking up. This may take a moment.";
+    syncStartupState();
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetchWithTimeout(
+          apiUrl("/api/health"), {}, Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now())
+        );
+        const health = await response.json().catch(() => ({}));
+        if (response.ok && health.status === "ok") {
+          apiReady = true;
+          syncStartupState();
+          return;
+        }
+      } catch (error) {
+        // A sleeping Render instance closes or times out requests until it has started.
+      }
+
+      if (Date.now() < deadline) {
+        await delay(Math.min(API_HEALTH_RETRY_MS, deadline - Date.now()));
+      }
+    }
+    throw new Error("The analysis service did not respond within the startup period.");
+  })();
+
+  try {
+    await apiReadyTask;
+  } finally {
+    apiReadyTask = null;
+  }
 }
 
 async function waitForConsensus(nimiq) {
@@ -204,7 +262,7 @@ function walletErrorKind(error) {
 }
 
 function syncUploadButtons() {
-  els.analyzeBtn.disabled = !selectedFile || actionBusy;
+  els.analyzeBtn.disabled = !selectedFile || actionBusy || !apiReady;
   els.advancedBtn.disabled = true;
   els.upgradeBtn.disabled = actionBusy || currentResult?.tier !== "basic";
 }
@@ -214,6 +272,7 @@ function initializeNimiq() {
   if (nimiqInitTask) return nimiqInitTask;
   nimiqInitTask = (async () => {
     try {
+    await waitForApiReady();
     if (!paymentConfig) {
       const response = await fetchWithRetry(apiUrl("/api/payments/config"));
       if (!response.ok) throw new Error("payment configuration unavailable");
@@ -229,15 +288,20 @@ function initializeNimiq() {
     nimiqPromise = init({ timeout: 10000 });
     await nimiqPromise;
     nimiqReady = true;
-    els.paymentStatus.textContent = pendingPayment && pendingPayment.sourceJobId === sourceJobId
+    els.paymentStatus.textContent = currentJobId && pendingPayment && pendingPayment.sourceJobId === sourceJobId
       ? "Payment recovery ready for this analysis."
       : `Nimiq Pay connected · ${paymentConfig.network} required`;
     els.paymentStatus.classList.add("ready");
     } catch (error) {
       nimiqPromise = null;
+      if (!apiReady) {
+        els.analyzeBtn.classList.remove("initializing");
+        inspectLabel.textContent = "Service unavailable";
+        inspectDetail.textContent = "Connection disrupted";
+      }
       els.paymentStatus.textContent = paymentConfig
         ? "Open this app inside Nimiq Pay to purchase advanced analysis."
-        : "Cannot reach the local backend. Keep the server open and reconnect to the same Wi-Fi.";
+        : "Connection disrupted. The analysis service did not respond. Check your connection and try again.";
     } finally {
       nimiqInitTask = null;
       syncUploadButtons();
@@ -355,7 +419,7 @@ function renderSteps(activeStep, uploadDone) {
 }
 
 function startAnalysis(endpoint) {
-  if (!selectedFile || actionBusy) return;
+  if (!selectedFile || actionBusy || !apiReady) return;
   actionBusy = true;
   els.uploadError.classList.add("hidden");
   els.analyzeBtn.disabled = true;
@@ -911,12 +975,16 @@ els.retryBtn.addEventListener("click", () => {
   showScreen("upload");
 });
 
-if (!currentJobId) pendingPayment = null;
-if (currentJobId) {
-  renderSteps("uploading", true);
-  els.phaseText.textContent = "Resuming analysis";
-  els.phaseDetail.textContent = "Checking the saved job status";
-  startPolling(currentJobId);
+// A new launch always opens the dashboard. Saved jobs are not navigated to automatically.
+if (Object.values(screens).some((screen) => window.location.hash === `#${screen.id}`)) {
+  window.history.replaceState(null, "", window.location.pathname + window.location.search);
+}
+showScreen("upload");
+syncStartupState();
+if (!savedJobId) {
+  sourceJobId = null;
+  pendingPayment = null;
+  persistRecovery();
 }
 
 window.addEventListener("focus", () => {

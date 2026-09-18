@@ -72,11 +72,15 @@ function advancedResult(id) {
   };
 }
 
-function mockApi({ verifyError = null } = {}) {
+function mockApi({ verifyError = null, healthResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
   let quoteNumber = 0;
   const quotes = new Map();
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url);
+    if (path === "/api/health") return response(
+      { status: "ok" },
+      healthResponses.length ? healthResponses.shift() : 200
+    );
     if (path === "/api/payments/config") return response({ enabled: true, amount_nim: 10, network: "testnet" });
     if (path === "/api/payments/quotes") {
       const sourceJobId = JSON.parse(options.body).source_job_id;
@@ -100,7 +104,12 @@ function mockApi({ verifyError = null } = {}) {
       const id = path.split("/")[3];
       return response(id.startsWith("advanced-") ? advancedResult(id) : basicResult(id));
     }
-    if (path.startsWith("/api/jobs/")) return response({ state: "complete", stage: "Complete" });
+    if (path.startsWith("/api/jobs/")) {
+      if (jobStatusError) throw jobStatusError;
+      const job = jobStatuses.length ? jobStatuses.shift() : { state: "complete", stage: "Complete" };
+      if (job?.httpStatus) return response(job.body || {}, job.httpStatus);
+      return response(job);
+    }
     throw new Error(`Unexpected request: ${path}`);
   });
   globalThis.fetch = fetchMock;
@@ -121,7 +130,11 @@ describe("basic inspection and per-job payment", () => {
     HTMLElement.prototype.focus = vi.fn();
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("opens the file chooser and starts basic analysis on the first click only", async () => {
     const provider = { isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() };
@@ -139,6 +152,148 @@ describe("basic inspection and per-job payment", () => {
     analyze.click();
     expect(FakeXMLHttpRequest.instances).toHaveLength(1);
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("keeps the upload dashboard on a fresh first launch", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/jobs/"))).toBe(false);
+  });
+
+  it("keeps the upload dashboard when reopening with no saved job", async () => {
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify({}));
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+    expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/jobs/"))).toBe(false);
+  });
+
+  it.each(["expired", "complete", "failed", "cancelled", "queued", "running"])(
+    "opens the dashboard without fetching or restoring a saved %s job", async (state) => {
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify({ jobId: `${state}-1`, sourceJobId: `${state}-1` }));
+      window.history.replaceState(null, "", "#screen-processing");
+      initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+      const fetchMock = mockApi();
+      await import("./app.js");
+      await flush();
+
+      expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+      expect(document.getElementById("screen-processing").classList.contains("hidden")).toBe(true);
+      expect(window.location.hash).toBe("");
+      expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/jobs/"))).toBe(false);
+      expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).jobId).toBe(`${state}-1`);
+    }
+  );
+
+  it("keeps saved recovery data when the backend is temporarily unreachable at startup", async () => {
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify({ jobId: "recoverable-1", sourceJobId: "recoverable-1" }));
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    mockApi({ jobStatusError: new TypeError("offline") });
+    await import("./app.js");
+    await flush();
+
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+    expect(document.getElementById("screen-processing").classList.contains("hidden")).toBe(true);
+    expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).jobId).toBe("recoverable-1");
+  });
+
+  it("waits for a sleeping backend to pass its health check before initialization", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ healthResponses: [503, 200] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+
+    expect(document.getElementById("payment-status").textContent).toContain("Starting Prometheus");
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+    expect(document.getElementById("analyze-btn").textContent).toContain("Initializing");
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
+    expect(document.getElementById("payment-status").textContent).toContain("Nimiq Pay connected");
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(document.getElementById("analyze-btn").textContent).toContain("Inspect video");
+    vi.useRealTimers();
+  });
+
+  it("wakes automatically after more than 90 seconds without duplicate requests", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ healthResponses: Array(47).fill(503) });
+    await import("./app.js");
+    chooseVideo();
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(92000);
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+    expect(document.getElementById("payment-status").textContent).not.toContain("Connection disrupted");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(48);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes" || url === "/api/analyze")).toHaveLength(0);
+    expect(FakeXMLHttpRequest.instances).toHaveLength(0);
+  });
+
+  it("continues immediately when the backend is already awake", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+    chooseVideo();
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+  });
+
+  it("shows the network state only after the backend stays unavailable for 100 seconds", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ healthResponses: Array(60).fill(503) });
+    await import("./app.js");
+    chooseVideo();
+    await vi.advanceTimersByTimeAsync(98000);
+
+    expect(document.getElementById("payment-status").textContent).toContain("Starting Prometheus");
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(document.getElementById("payment-status").textContent).toContain("Connection disrupted");
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(50);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/inspect" || url === "/api/analyze")).toHaveLength(0);
+    expect(FakeXMLHttpRequest.instances).toHaveLength(0);
+  });
+
+  it("retries readiness without sending analysis requests", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ healthResponses: [503, 503, 200] });
+    await import("./app.js");
+    chooseVideo();
+    document.getElementById("analyze-btn").click();
+    await vi.advanceTimersByTimeAsync(4000);
+
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(3);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/inspect" || url === "/api/analyze")).toHaveLength(0);
+    expect(FakeXMLHttpRequest.instances).toHaveLength(0);
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
   });
 
   it("honors the first upgrade click while Nimiq is still initializing", async () => {
@@ -234,39 +389,32 @@ describe("basic inspection and per-job payment", () => {
     expect(fetchMock.mock.calls.some(([url]) => url === "/api/analyze")).toBe(false);
   });
 
-  it("recovers a verified payment only for its original basic job after refresh", async () => {
+  it("does not navigate to a saved completed job or submit its payment after refresh", async () => {
     localStorage.setItem(RECOVERY_KEY, JSON.stringify({
       jobId: "basic-1", sourceJobId: "basic-1",
       payment: { sourceJobId: "basic-1", quoteId: "quote-saved", token: "saved-token", txHash: HASH_A },
     }));
-    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true), sendBasicTransactionWithData: vi.fn() };
-    initMock.mockResolvedValue(provider);
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn().mockResolvedValue(true), sendBasicTransactionWithData: vi.fn() });
     const fetchMock = mockApi();
     await import("./app.js");
     await flush();
-    document.getElementById("upgrade-btn").click();
-    await flush();
-    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes")).toHaveLength(0);
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(1);
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/jobs/"))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(0);
   });
 
-  it("does not apply a saved payment to a different job", async () => {
+  it("does not use a saved payment tied to a different job on launch", async () => {
     localStorage.setItem(RECOVERY_KEY, JSON.stringify({
       jobId: "basic-2", sourceJobId: "basic-1",
       payment: { sourceJobId: "basic-1", quoteId: "old-quote", token: "old-token", txHash: HASH_A },
     }));
-    const provider = { isConsensusEstablished: vi.fn().mockResolvedValue(true),
-      sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_B) };
-    initMock.mockResolvedValue(provider);
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn().mockResolvedValue(true), sendBasicTransactionWithData: vi.fn() });
     const fetchMock = mockApi();
     await import("./app.js");
     await flush();
-    document.getElementById("upgrade-btn").click();
-    await flush();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("old-quote/verify"))).toBe(false);
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes")).toHaveLength(1);
-    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes")).toHaveLength(0);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/jobs/"))).toBe(false);
   });
 
   it("holds the same job payment through a verification interruption", async () => {
