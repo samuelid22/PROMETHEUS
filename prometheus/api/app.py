@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,7 +34,7 @@ from prometheus.storage import prepare_run_directory, prepare_scene_directory
 from prometheus.video.probe import probe_video
 from prometheus.video.sampler import FrameSampler
 from prometheus.video.segmenter import SceneSegmenter
-from prometheus.video.tools import VideoToolError
+from prometheus.video.tools import VideoToolError, resolve_tool
 
 _ROOT_DIR = Path(__file__).resolve().parents[2]
 _WEB_DIR = _ROOT_DIR / "web"
@@ -41,6 +45,8 @@ _DEFAULT_NIMIQ_RECIPIENT = "NQ43 HJUE 9G1D 5LQF C752 5T7H EJ9M 4QEM 1CB1"
 _DEFAULT_NIMIQ_RPC_URL = "https://rpc.testnet.nimiqwatch.com/"
 _DEFAULT_NIMIQ_AMOUNT_LUNA = 1_000_000
 _STAGED_UPLOAD_LIFETIME_SECONDS = 60 * 60
+_UPLOAD_ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_LOG = logging.getLogger("prometheus.api")
 
 
 def _resolve_provider() -> str:
@@ -71,6 +77,60 @@ def _storage_path(value: Path | str) -> Path:
 
 def _cors_origins(value: str | None) -> list[str]:
     return [origin.strip().rstrip("/") for origin in (value or "").split(",") if origin.strip()]
+
+
+def _verify_writable_directory(path: Path) -> None:
+    """Prove the local work directory can be used, without retaining data."""
+    if not path.is_dir():
+        raise OSError("required work directory is unavailable")
+    probe = path / f".prometheus-ready-{uuid.uuid4().hex}"
+    try:
+        with probe.open("xb"):
+            pass
+    except OSError as exc:
+        raise OSError("required work directory is not writable") from exc
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def _verify_video_tool(name: str) -> None:
+    executable = resolve_tool(name)
+    try:
+        subprocess.run(
+            [executable, "-version"],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise VideoToolError(f"{name} executable is unavailable") from exc
+
+
+def _safe_upload_attempt_id(value: str | None) -> str:
+    if value and _UPLOAD_ATTEMPT_ID_RE.fullmatch(value):
+        return value
+    return "missing" if not value else "invalid"
+
+
+def _safe_origin(value: str | None) -> str:
+    if not value:
+        return "missing"
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return "invalid"
+
+
+def _log_upload_lifecycle(attempt_id: str, origin: str, lifecycle: str, status: int | None = None) -> None:
+    fields = (
+        f"upload_attempt={attempt_id} timestamp={datetime.now(timezone.utc).isoformat()} "
+        f"reached_fastapi=true origin={origin} lifecycle={lifecycle}"
+    )
+    if status is not None:
+        fields = f"{fields} status={status}"
+    _LOG.info(fields)
 
 
 def create_app(
@@ -104,6 +164,7 @@ def create_app(
     )
 
     app = FastAPI(title="Prometheus", version=__version__, docs_url="/api/docs")
+    app.state.prometheus_startup_complete = False
     cors_origins = _cors_origins(os.environ.get("PROMETHEUS_CORS_ORIGINS"))
     if cors_origins:
         app.add_middleware(
@@ -116,6 +177,26 @@ def create_app(
     manager = JobManager(max_workers=1)
     staged_uploads: dict[str, tuple[str, Path, float]] = {}
     staged_uploads_lock = threading.Lock()
+
+    @app.on_event("startup")
+    async def mark_startup_complete() -> None:
+        app.state.prometheus_startup_complete = True
+
+    @app.middleware("http")
+    async def log_inspection_upload(request: Request, call_next):
+        if request.method != "POST" or request.url.path != "/api/inspect":
+            return await call_next(request)
+
+        attempt_id = _safe_upload_attempt_id(request.query_params.get("upload_attempt_id"))
+        origin = _safe_origin(request.headers.get("origin"))
+        _log_upload_lifecycle(attempt_id, origin, "received")
+        try:
+            response = await call_next(request)
+        except BaseException:
+            _log_upload_lifecycle(attempt_id, origin, "interrupted")
+            raise
+        _log_upload_lifecycle(attempt_id, origin, "response", response.status_code)
+        return response
 
     def _cleanup_staged_uploads() -> None:
         cutoff = time.time() - _STAGED_UPLOAD_LIFETIME_SECONDS
@@ -244,6 +325,25 @@ def create_app(
             },
             "payment_required": require_payment,
         }
+
+    @app.get("/api/ready")
+    def ready() -> dict:
+        """Check only local prerequisites for accepting a first upload."""
+        if not app.state.prometheus_startup_complete:
+            raise HTTPException(status_code=503, detail="Service startup is still in progress.")
+        try:
+            _verify_writable_directory(upload_root)
+            _verify_writable_directory(output_root)
+            _verify_video_tool("ffmpeg")
+            _verify_video_tool("ffprobe")
+            if manager is None:
+                raise RuntimeError("analysis job manager is unavailable")
+            config = _make_config("ready")
+            if not config.analyzer.provider or not config.output.directory:
+                raise RuntimeError("required analysis configuration is unavailable")
+        except (OSError, RuntimeError, VideoToolError) as exc:
+            raise HTTPException(status_code=503, detail=f"Service is not ready: {exc}") from exc
+        return {"status": "ready"}
 
     @app.get("/api/payments/config")
     def payment_config() -> dict:

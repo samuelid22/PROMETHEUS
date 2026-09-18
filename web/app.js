@@ -180,7 +180,7 @@ function syncStartupState() {
 }
 
 async function waitForApiReady() {
-  if (apiReady) return;
+  if (apiReady) return true;
   if (apiReadyTask) return apiReadyTask;
 
   apiReadyTask = (async () => {
@@ -195,26 +195,64 @@ async function waitForApiReady() {
         );
         const health = await response.json().catch(() => ({}));
         if (response.ok && health.status === "ok") {
-          apiReady = true;
-          syncStartupState();
-          return;
+          els.paymentStatus.textContent = "Preparing the analysis service…";
+          const readyResponse = await fetchWithTimeout(
+            apiUrl("/api/ready"), {}, Math.min(REQUEST_TIMEOUT_MS, deadline - Date.now())
+          );
+          const ready = await readyResponse.json().catch(() => ({}));
+          if (readyResponse.ok && ready.status === "ready") {
+            apiReady = true;
+            syncStartupState();
+            return true;
+          }
         }
       } catch (error) {
-        // A sleeping Render instance closes or times out requests until it has started.
+        // Render can accept a liveness request before its local upload dependencies are ready.
       }
 
       if (Date.now() < deadline) {
         await delay(Math.min(API_HEALTH_RETRY_MS, deadline - Date.now()));
       }
     }
-    throw new Error("The analysis service did not respond within the startup period.");
+    apiReady = false;
+    els.analyzeBtn.classList.remove("initializing");
+    inspectLabel.textContent = "Service unavailable";
+    inspectDetail.textContent = "Connection disrupted";
+    els.paymentStatus.textContent = "Connection disrupted. The analysis service did not become ready. Try again shortly.";
+    syncUploadButtons();
+    return false;
   })();
 
   try {
-    await apiReadyTask;
+    return await apiReadyTask;
   } finally {
     apiReadyTask = null;
   }
+}
+
+async function isUploadReady() {
+  if (!apiReady) return false;
+  try {
+    const response = await fetchWithTimeout(apiUrl("/api/ready"));
+    const ready = await response.json().catch(() => ({}));
+    if (response.ok && ready.status === "ready") return true;
+  } catch (error) {
+    // This check only decides whether it is safe to begin a new multipart upload.
+  }
+  apiReady = false;
+  syncStartupState();
+  void waitForApiReady();
+  return false;
+}
+
+function createUploadAttemptId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `upload-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function uploadAttemptUrl(endpoint, attemptId) {
+  const separator = endpoint.includes("?") ? "&" : "?";
+  return apiUrl(`${endpoint}${separator}upload_attempt_id=${encodeURIComponent(attemptId)}`);
 }
 
 async function waitForConsensus(nimiq) {
@@ -272,7 +310,8 @@ function initializeNimiq() {
   if (nimiqInitTask) return nimiqInitTask;
   nimiqInitTask = (async () => {
     try {
-    await waitForApiReady();
+    const backendReady = await waitForApiReady();
+    if (!backendReady) return;
     if (!paymentConfig) {
       const response = await fetchWithRetry(apiUrl("/api/payments/config"));
       if (!response.ok) throw new Error("payment configuration unavailable");
@@ -295,9 +334,7 @@ function initializeNimiq() {
     } catch (error) {
       nimiqPromise = null;
       if (!apiReady) {
-        els.analyzeBtn.classList.remove("initializing");
-        inspectLabel.textContent = "Service unavailable";
-        inspectDetail.textContent = "Connection disrupted";
+        return;
       }
       els.paymentStatus.textContent = paymentConfig
         ? "Open this app inside Nimiq Pay to purchase advanced analysis."
@@ -418,9 +455,22 @@ function renderSteps(activeStep, uploadDone) {
   });
 }
 
-function startAnalysis(endpoint) {
+async function startAnalysis(endpoint) {
   if (!selectedFile || actionBusy || !apiReady) return;
   actionBusy = true;
+  syncUploadButtons();
+  if (!await isUploadReady()) {
+    actionBusy = false;
+    syncUploadButtons();
+    return;
+  }
+  clearTimeout(pollTimer);
+  currentJobId = null;
+  sourceJobId = null;
+  currentResult = null;
+  pendingPayment = null;
+  savedJobId = null;
+  persistRecovery();
   els.uploadError.classList.add("hidden");
   els.analyzeBtn.disabled = true;
   showScreen("processing");
@@ -432,8 +482,9 @@ function startAnalysis(endpoint) {
   els.phaseText.textContent = "Uploading video";
   els.phaseDetail.textContent = "Sending the file to the backend";
 
+  const attemptId = createUploadAttemptId();
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", apiUrl(endpoint));
+  xhr.open("POST", uploadAttemptUrl(endpoint, attemptId));
   xhr.timeout = UPLOAD_TIMEOUT_MS;
   xhr.upload.onprogress = (event) => {
     if (!event.lengthComputable) return;
@@ -464,14 +515,14 @@ function startAnalysis(endpoint) {
   };
   xhr.onerror = () => {
     actionBusy = false;
-    showError(els.jobError, "Upload connection was interrupted. Check your connection and retry.");
+    showError(els.jobError, `Upload connection was interrupted before Prometheus returned a response. No upload retry was made. Reference: ${attemptId}.`);
     els.retryBtn.classList.remove("hidden");
     els.retryBtn.textContent = "Back to upload";
     syncUploadButtons();
   };
   xhr.ontimeout = () => {
     actionBusy = false;
-    showError(els.jobError, "Upload timed out. Check your connection and retry.");
+    showError(els.jobError, `Upload timed out before Prometheus returned a response. No upload retry was made. Reference: ${attemptId}.`);
     els.retryBtn.classList.remove("hidden");
     els.retryBtn.textContent = "Back to upload";
     syncUploadButtons();
@@ -988,9 +1039,11 @@ if (!savedJobId) {
 }
 
 window.addEventListener("focus", () => {
+  if (!apiReady) void waitForApiReady();
   if (!nimiqReady) initializeNimiq();
 });
 window.addEventListener("online", () => {
+  if (!apiReady) void waitForApiReady();
   if (!nimiqReady) initializeNimiq();
   if (currentJobId) startPolling(currentJobId);
 });

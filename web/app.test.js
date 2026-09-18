@@ -47,7 +47,8 @@ function chooseVideo(name = "clip.mp4") {
 async function completeBasic(id = "basic-1", index = 0) {
   const analyze = document.getElementById("analyze-btn");
   analyze.click();
-  expect(FakeXMLHttpRequest.instances[index].url).toBe("/api/inspect");
+  await flush();
+  expect(FakeXMLHttpRequest.instances[index].url).toMatch(/^\/api\/inspect\?upload_attempt_id=/);
   const xhr = FakeXMLHttpRequest.instances[index];
   xhr.status = 202;
   xhr.responseText = JSON.stringify({ job_id: id });
@@ -72,7 +73,7 @@ function advancedResult(id) {
   };
 }
 
-function mockApi({ verifyError = null, healthResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
+function mockApi({ verifyError = null, healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
   let quoteNumber = 0;
   const quotes = new Map();
   const fetchMock = vi.fn(async (url, options = {}) => {
@@ -80,6 +81,10 @@ function mockApi({ verifyError = null, healthResponses = [], jobStatuses = [], j
     if (path === "/api/health") return response(
       { status: "ok" },
       healthResponses.length ? healthResponses.shift() : 200
+    );
+    if (path === "/api/ready") return response(
+      { status: "ready" },
+      readyResponses.length ? readyResponses.shift() : 200
     );
     if (path === "/api/payments/config") return response({ enabled: true, amount_nim: 10, network: "testnet" });
     if (path === "/api/payments/quotes") {
@@ -150,6 +155,7 @@ describe("basic inspection and per-job payment", () => {
     const analyze = document.getElementById("analyze-btn");
     analyze.click();
     analyze.click();
+    await flush();
     expect(FakeXMLHttpRequest.instances).toHaveLength(1);
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
   });
@@ -221,6 +227,7 @@ describe("basic inspection and per-job payment", () => {
 
     await vi.advanceTimersByTimeAsync(2000);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
     expect(document.getElementById("payment-status").textContent).toContain("Nimiq Pay connected");
     expect(document.getElementById("analyze-btn").disabled).toBe(false);
@@ -242,6 +249,7 @@ describe("basic inspection and per-job payment", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(document.getElementById("analyze-btn").disabled).toBe(false);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(48);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes" || url === "/api/analyze")).toHaveLength(0);
     expect(FakeXMLHttpRequest.instances).toHaveLength(0);
@@ -255,10 +263,30 @@ describe("basic inspection and per-job payment", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
     expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
     chooseVideo();
     expect(document.getElementById("analyze-btn").disabled).toBe(false);
+  });
+
+  it("keeps Local Inspection disabled until upload readiness succeeds", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ readyResponses: [503, 200] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
   });
 
   it("shows the network state only after the backend stays unavailable for 100 seconds", async () => {
@@ -290,6 +318,7 @@ describe("basic inspection and per-job payment", () => {
     await vi.advanceTimersByTimeAsync(4000);
 
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(3);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/inspect" || url === "/api/analyze")).toHaveLength(0);
     expect(FakeXMLHttpRequest.instances).toHaveLength(0);

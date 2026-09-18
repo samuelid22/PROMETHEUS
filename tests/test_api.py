@@ -5,6 +5,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import prometheus.api.app as app_module
 from prometheus.api.app import create_app
 from prometheus.api.payments import PaymentConfig, PaymentService
 from prometheus.video.tools import VideoToolError
@@ -86,6 +87,73 @@ def test_health(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["analyzer"]["provider"] == "mock"
+
+
+def test_ready_confirms_local_upload_prerequisites(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "_verify_video_tool", lambda name: None)
+    app = create_app(
+        provider="mock",
+        output_dir=tmp_path / "out",
+        upload_dir=tmp_path / "uploads",
+    )
+
+    with TestClient(app) as ready_client:
+        response = ready_client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_ready_reports_missing_ffmpeg(monkeypatch, tmp_path):
+    def missing_ffmpeg(name):
+        if name == "ffmpeg":
+            raise VideoToolError("ffmpeg executable not found")
+
+    monkeypatch.setattr(app_module, "_verify_video_tool", missing_ffmpeg)
+    app = create_app(
+        provider="mock",
+        output_dir=tmp_path / "out",
+        upload_dir=tmp_path / "uploads",
+    )
+
+    with TestClient(app) as ready_client:
+        response = ready_client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert "ffmpeg executable not found" in response.json()["detail"]
+
+
+def test_ready_reports_non_writable_work_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        app_module,
+        "_verify_writable_directory",
+        lambda path: (_ for _ in ()).throw(OSError("required work directory is not writable")),
+    )
+    app = create_app(
+        provider="mock",
+        output_dir=tmp_path / "out",
+        upload_dir=tmp_path / "uploads",
+    )
+
+    with TestClient(app) as ready_client:
+        response = ready_client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert "required work directory is not writable" in response.json()["detail"]
+
+
+def test_inspection_upload_logs_safe_attempt_lifecycle(client, caplog):
+    caplog.set_level("INFO", logger="prometheus.api")
+
+    response = client.post(
+        "/api/inspect?upload_attempt_id=upload-abc-123",
+        headers={"Origin": "https://example.test"},
+    )
+
+    assert response.status_code == 422
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("upload_attempt=upload-abc-123" in message and "lifecycle=received" in message for message in messages)
+    assert any("upload_attempt=upload-abc-123" in message and "lifecycle=response status=422" in message for message in messages)
 
 
 def test_api_rejects_non_testnet_payment_configuration(monkeypatch, tmp_path):
