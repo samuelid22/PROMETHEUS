@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import prometheus.api.app as app_module
 from prometheus.api.app import create_app
+from prometheus.api.jobs import JobManager
 from prometheus.api.payments import PaymentConfig, PaymentService
 from prometheus.video.tools import VideoToolError
 
@@ -140,6 +141,51 @@ def test_ready_reports_non_writable_work_directory(monkeypatch, tmp_path):
 
     assert response.status_code == 503
     assert "required work directory is not writable" in response.json()["detail"]
+
+
+def test_upload_ping_returns_204_without_creating_jobs_or_probing(monkeypatch, tmp_path, caplog):
+    created = []
+    original_create = JobManager.create
+
+    def tracking_create(self, *args, **kwargs):
+        job = original_create(self, *args, **kwargs)
+        created.append(job.id)
+        return job
+
+    def forbidden_probe(*args, **kwargs):
+        raise AssertionError("upload-ping must not call ffprobe")
+
+    monkeypatch.setattr(JobManager, "create", tracking_create)
+    monkeypatch.setattr(app_module, "probe_video", forbidden_probe)
+    caplog.set_level("INFO", logger="prometheus.api")
+    upload_dir = tmp_path / "uploads"
+    app = create_app(
+        provider="mock",
+        output_dir=tmp_path / "out",
+        upload_dir=upload_dir,
+    )
+
+    response = TestClient(app).post(
+        "/api/upload-ping?upload_ping_id=ping-abc-123",
+        headers={"Origin": "https://prometheus-beta-liard.vercel.app"},
+        files={"file": ("ping.bin", b"prometheus-upload-ping", "application/octet-stream")},
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert created == []
+    leftover = [path for path in upload_dir.iterdir() if path.is_file()]
+    assert leftover == []
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("upload_ping=ping-abc-123" in message and "lifecycle=received" in message for message in messages)
+    assert any("upload_ping=ping-abc-123" in message and "lifecycle=response status=204" in message for message in messages)
+    assert all("upload_attempt=" not in message for message in messages)
+
+
+def test_upload_ping_without_file_still_returns_204(client):
+    response = client.post("/api/upload-ping")
+    assert response.status_code == 204
+    assert response.content == b""
 
 
 def test_inspection_upload_logs_safe_attempt_lifecycle(client, caplog):

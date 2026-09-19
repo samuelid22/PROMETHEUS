@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
@@ -46,6 +46,7 @@ _DEFAULT_NIMIQ_RPC_URL = "https://rpc.testnet.nimiqwatch.com/"
 _DEFAULT_NIMIQ_AMOUNT_LUNA = 1_000_000
 _STAGED_UPLOAD_LIFETIME_SECONDS = 60 * 60
 _UPLOAD_ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_UPLOAD_PING_MAX_BYTES = 64 * 1024
 _LOG = logging.getLogger("prometheus.api")
 
 
@@ -133,6 +134,16 @@ def _log_upload_lifecycle(attempt_id: str, origin: str, lifecycle: str, status: 
     _LOG.info(fields)
 
 
+def _log_upload_ping_lifecycle(ping_id: str, origin: str, lifecycle: str, status: int | None = None) -> None:
+    fields = (
+        f"upload_ping={ping_id} timestamp={datetime.now(timezone.utc).isoformat()} "
+        f"reached_fastapi=true origin={origin} lifecycle={lifecycle}"
+    )
+    if status is not None:
+        fields = f"{fields} status={status}"
+    _LOG.info(fields)
+
+
 def create_app(
     provider: str | None = None,
     model: str | None = None,
@@ -184,6 +195,18 @@ def create_app(
 
     @app.middleware("http")
     async def log_inspection_upload(request: Request, call_next):
+        if request.method == "POST" and request.url.path == "/api/upload-ping":
+            ping_id = _safe_upload_attempt_id(request.query_params.get("upload_ping_id"))
+            origin = _safe_origin(request.headers.get("origin"))
+            _log_upload_ping_lifecycle(ping_id, origin, "received")
+            try:
+                response = await call_next(request)
+            except BaseException:
+                _log_upload_ping_lifecycle(ping_id, origin, "interrupted")
+                raise
+            _log_upload_ping_lifecycle(ping_id, origin, "response", response.status_code)
+            return response
+
         if request.method != "POST" or request.url.path != "/api/inspect":
             return await call_next(request)
 
@@ -344,6 +367,17 @@ def create_app(
         except (OSError, RuntimeError, VideoToolError) as exc:
             raise HTTPException(status_code=503, detail=f"Service is not ready: {exc}") from exc
         return {"status": "ready"}
+
+    @app.post("/api/upload-ping", status_code=204)
+    async def upload_ping(file: UploadFile | None = File(default=None)) -> Response:
+        """Prove the multipart POST path without creating work or storing media."""
+        if file is not None:
+            size = 0
+            while chunk := await file.read(8192):
+                size += len(chunk)
+                if size > _UPLOAD_PING_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="Upload ping is limited to 64 KB.")
+        return Response(status_code=204)
 
     @app.get("/api/payments/config")
     def payment_config() -> dict:
