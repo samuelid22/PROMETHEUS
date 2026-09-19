@@ -65,6 +65,7 @@ const els = {
   analyzeBtn: document.getElementById("analyze-btn"),
   advancedBtn: document.getElementById("advanced-btn"),
   paymentStatus: document.getElementById("payment-status"),
+  retryInitBtn: document.getElementById("retry-init-btn"),
   uploadError: document.getElementById("upload-error"),
   phaseText: document.getElementById("phase-text"),
   phaseDetail: document.getElementById("phase-detail"),
@@ -179,12 +180,30 @@ function syncStartupState() {
   syncUploadButtons();
 }
 
+async function pingUploadPath() {
+  const pingId = createUploadAttemptId();
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob(["prometheus-upload-ping"], { type: "application/octet-stream" }),
+    "ping.bin",
+  );
+  const response = await fetchWithTimeout(
+    apiUrl(`/api/upload-ping?upload_ping_id=${encodeURIComponent(pingId)}`),
+    { method: "POST", body: form },
+  );
+  if (response.status === 204) return "ok";
+  if (response.status === 404 || response.status === 405) return "unsupported";
+  return "fail";
+}
+
 async function waitForApiReady() {
   if (apiReady) return true;
   if (apiReadyTask) return apiReadyTask;
 
   apiReadyTask = (async () => {
     const deadline = Date.now() + API_HEALTH_DEADLINE_MS;
+    els.retryInitBtn.classList.add("hidden");
     els.paymentStatus.classList.remove("ready");
     els.paymentStatus.textContent = "Starting Prometheus… The analysis service is waking up. This may take a moment.";
     syncStartupState();
@@ -201,9 +220,14 @@ async function waitForApiReady() {
           );
           const ready = await readyResponse.json().catch(() => ({}));
           if (readyResponse.ok && ready.status === "ready") {
-            apiReady = true;
+            const ping = await pingUploadPath();
+            if (ping === "ok" || ping === "unsupported") {
+              apiReady = true;
+              syncStartupState();
+              return true;
+            }
+            els.paymentStatus.textContent = "Upload service is reconnecting…";
             syncStartupState();
-            return true;
           }
         }
       } catch (error) {
@@ -219,6 +243,7 @@ async function waitForApiReady() {
     inspectLabel.textContent = "Service unavailable";
     inspectDetail.textContent = "Connection disrupted";
     els.paymentStatus.textContent = "Connection disrupted. The analysis service did not become ready. Try again shortly.";
+    els.retryInitBtn.classList.remove("hidden");
     syncUploadButtons();
     return false;
   })();
@@ -1024,6 +1049,10 @@ els.fileInput.addEventListener("change", () => {
   if (els.fileInput.files && els.fileInput.files[0]) setFile(els.fileInput.files[0]);
 });
 els.fileClear.addEventListener("click", clearFile);
+els.retryInitBtn.addEventListener("click", () => {
+  if (apiReady || apiReadyTask) return;
+  void waitForApiReady();
+});
 els.analyzeBtn.addEventListener("click", () => startAnalysis("/api/inspect"));
 els.advancedBtn.addEventListener("click", () => startPaidAnalysis());
 els.upgradeBtn.addEventListener("click", () => startPaidAnalysis(els.upgradeError));

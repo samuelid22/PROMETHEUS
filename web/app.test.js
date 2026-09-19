@@ -18,8 +18,16 @@ function isInspectUrl(url) {
   return /\/api\/inspect(\?|$)/.test(String(url));
 }
 
+function isUploadPingUrl(url) {
+  return /\/api\/upload-ping(\?|$)/.test(String(url));
+}
+
 function inspectCalls(fetchMock = globalThis.fetch) {
   return fetchMock.mock.calls.filter(([url]) => isInspectUrl(url));
+}
+
+function uploadPingCalls(fetchMock = globalThis.fetch) {
+  return fetchMock.mock.calls.filter(([url]) => isUploadPingUrl(url));
 }
 
 async function flush() {
@@ -65,7 +73,7 @@ function advancedResult(id) {
   };
 }
 
-function mockApi({ verifyError = null, inspectError = null, healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
+function mockApi({ verifyError = null, inspectError = null, pingResponses = [], healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
   let quoteNumber = 0;
   let inspectNumber = 0;
   const quotes = new Map();
@@ -79,6 +87,14 @@ function mockApi({ verifyError = null, inspectError = null, healthResponses = []
       { status: "ready" },
       readyResponses.length ? readyResponses.shift() : 200
     );
+    if (isUploadPingUrl(path)) {
+      if (pingResponses.length) {
+        const next = pingResponses.shift();
+        if (next instanceof Error) throw next;
+        return response({}, next);
+      }
+      return response({}, 204);
+    }
     if (path === "/api/payments/config") return response({ enabled: true, amount_nim: 10, network: "testnet" });
     if (path === "/api/payments/quotes") {
       const sourceJobId = JSON.parse(options.body).source_job_id;
@@ -282,7 +298,90 @@ describe("basic inspection and per-job payment", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(document.getElementById("analyze-btn").disabled).toBe(false);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(2);
+    expect(uploadPingCalls(fetchMock)).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
+  });
+
+  it("enables Local Inspection only after a successful upload-path canary", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(uploadPingCalls(fetchMock)).toHaveLength(1);
+    const ping = uploadPingCalls(fetchMock)[0];
+    expect(ping[0]).toMatch(/^\/api\/upload-ping\?upload_ping_id=[A-Za-z0-9-]+$/);
+    expect(ping[1].method).toBe("POST");
+    expect(ping[1].body).toBeInstanceOf(FormData);
+    expect(ping[1].headers).toBeUndefined();
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it("keeps Inspect disabled while the canary fails then recovers without retrying a video upload", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ pingResponses: [503, 204] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+    expect(document.getElementById("payment-status").textContent).toContain("Upload service is reconnecting");
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(document.getElementById("analyze-btn").textContent).toContain("Inspect video");
+    expect(uploadPingCalls(fetchMock)).toHaveLength(2);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it("offers Retry initialization after the canary keeps failing and does not require a refresh", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ pingResponses: Array(50).fill(503) });
+    await import("./app.js");
+    chooseVideo();
+    await vi.advanceTimersByTimeAsync(100000);
+
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+    expect(document.getElementById("payment-status").textContent).toContain("Connection disrupted");
+    expect(document.getElementById("retry-init-btn").classList.contains("hidden")).toBe(false);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+
+    document.getElementById("retry-init-btn").click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(document.getElementById("retry-init-btn").classList.contains("hidden")).toBe(true);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it("treats a missing upload-ping route as compatible with an older backend", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ pingResponses: [404] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(uploadPingCalls(fetchMock)).toHaveLength(1);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it("does not create analysis jobs from canary requests", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+
+    expect(uploadPingCalls(fetchMock).length).toBeGreaterThan(0);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(0);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/jobs/"))).toBe(false);
   });
 
   it("shows the network state only after the backend stays unavailable for 100 seconds", async () => {
