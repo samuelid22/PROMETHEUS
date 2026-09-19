@@ -81,11 +81,11 @@ Use a short MP4 in Chrome and in Nimiq Pay. Note the `upload_attempt_id` from th
 Prefer a revert commit so history stays intact. Do not `git reset --hard` on `main` if the experiment commit was already pushed.
 
 ```powershell
-git revert <experiment-commit-sha>
+git revert 030b616
 git push origin main
 ```
 
-`<experiment-commit-sha>` is the commit that introduced `fetch(FormData)` inspect uploads. After revert, Vercel should republish the `287fc24` XHR inspect path.
+`030b616` (`030b616a634c7bbb4768830f05545ada3d0f70fa`) is the commit that introduced `fetch(FormData)` inspect uploads. After revert, Vercel should republish the `287fc24` XHR inspect path.
 
 Emergency Vercel-only rollback, if Git is delayed: in the Vercel dashboard, open Deployments, find the production deployment for `287fc24`, and Promote it to Production. The API on Render can stay as-is.
 
