@@ -35,3 +35,5 @@ logs/
 
 # Local-only project notes
 CODEX_HANDOFF.md
+
+.vercel

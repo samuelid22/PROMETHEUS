@@ -10,23 +10,16 @@ const HASH_A = "ab".repeat(32);
 const HASH_B = "cd".repeat(32);
 const RECOVERY_KEY = "prometheus.recovery.v2";
 
-class FakeXMLHttpRequest {
-  static instances = [];
-  constructor() {
-    this.upload = {};
-    FakeXMLHttpRequest.instances.push(this);
-  }
-  open(method, url) {
-    this.method = method;
-    this.url = url;
-  }
-  send(body) {
-    this.body = body;
-  }
-}
-
 function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+function isInspectUrl(url) {
+  return /\/api\/inspect(\?|$)/.test(String(url));
+}
+
+function inspectCalls(fetchMock = globalThis.fetch) {
+  return fetchMock.mock.calls.filter(([url]) => isInspectUrl(url));
 }
 
 async function flush() {
@@ -44,16 +37,15 @@ function chooseVideo(name = "clip.mp4") {
   input.dispatchEvent(new Event("change"));
 }
 
-async function completeBasic(id = "basic-1", index = 0) {
+async function completeBasic() {
   const analyze = document.getElementById("analyze-btn");
   analyze.click();
   await flush();
-  expect(FakeXMLHttpRequest.instances[index].url).toMatch(/^\/api\/inspect\?upload_attempt_id=/);
-  const xhr = FakeXMLHttpRequest.instances[index];
-  xhr.status = 202;
-  xhr.responseText = JSON.stringify({ job_id: id });
-  xhr.onload();
-  await flush();
+  const inspect = inspectCalls().at(-1);
+  expect(inspect[0]).toMatch(/^\/api\/inspect\?upload_attempt_id=[A-Za-z0-9-]+$/);
+  expect(inspect[1].method).toBe("POST");
+  expect(inspect[1].body).toBeInstanceOf(FormData);
+  expect(inspect[1].headers?.["Content-Type"]).toBeUndefined();
   expect(document.getElementById("screen-results").classList.contains("hidden")).toBe(false);
   expect(document.getElementById("upgrade-btn").disabled).toBe(false);
 }
@@ -73,8 +65,9 @@ function advancedResult(id) {
   };
 }
 
-function mockApi({ verifyError = null, healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
+function mockApi({ verifyError = null, inspectError = null, healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
   let quoteNumber = 0;
+  let inspectNumber = 0;
   const quotes = new Map();
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url);
@@ -101,6 +94,11 @@ function mockApi({ verifyError = null, healthResponses = [], readyResponses = []
       const hash = JSON.parse(options.body).tx_hash;
       return response({ source_job_id: quotes.get(quoteId) || "basic-1", state: "verified", tx_hash: hash || HASH_A });
     }
+    if (isInspectUrl(path)) {
+      if (inspectError) throw inspectError;
+      inspectNumber += 1;
+      return response({ job_id: `basic-${inspectNumber}` }, 202);
+    }
     if (path === "/api/analyze") {
       return response({ job_id: `advanced-${options.body.get("source_job_id")}` }, 202);
     }
@@ -125,12 +123,10 @@ describe("basic inspection and per-job payment", () => {
   beforeEach(() => {
     vi.resetModules();
     initMock.mockReset();
-    FakeXMLHttpRequest.instances = [];
     document.open();
     document.write(html);
     document.close();
     localStorage.clear();
-    globalThis.XMLHttpRequest = FakeXMLHttpRequest;
     window.scrollTo = vi.fn();
     HTMLElement.prototype.focus = vi.fn();
   });
@@ -156,7 +152,7 @@ describe("basic inspection and per-job payment", () => {
     analyze.click();
     analyze.click();
     await flush();
-    expect(FakeXMLHttpRequest.instances).toHaveLength(1);
+    expect(inspectCalls()).toHaveLength(1);
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
   });
 
@@ -252,7 +248,7 @@ describe("basic inspection and per-job payment", () => {
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes" || url === "/api/analyze")).toHaveLength(0);
-    expect(FakeXMLHttpRequest.instances).toHaveLength(0);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
   });
 
   it("continues immediately when the backend is already awake", async () => {
@@ -304,8 +300,7 @@ describe("basic inspection and per-job payment", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(document.getElementById("payment-status").textContent).toContain("Connection disrupted");
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(50);
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/inspect" || url === "/api/analyze")).toHaveLength(0);
-    expect(FakeXMLHttpRequest.instances).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([url]) => isInspectUrl(url) || url === "/api/analyze")).toHaveLength(0);
   });
 
   it("retries readiness without sending analysis requests", async () => {
@@ -320,9 +315,115 @@ describe("basic inspection and per-job payment", () => {
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(3);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/ready")).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/config")).toHaveLength(1);
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/inspect" || url === "/api/analyze")).toHaveLength(0);
-    expect(FakeXMLHttpRequest.instances).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([url]) => isInspectUrl(url) || url === "/api/analyze")).toHaveLength(0);
     expect(document.getElementById("analyze-btn").disabled).toBe(false);
+  });
+
+  it("does not start a multipart upload when readiness is lost before the click", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi({ readyResponses: [200, 503, 200] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+    document.getElementById("analyze-btn").click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+    expect(document.getElementById("screen-upload").classList.contains("hidden")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(document.getElementById("analyze-btn").disabled).toBe(false);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it("creates one correlated upload request for one intentional click", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    const analyze = document.getElementById("analyze-btn");
+    analyze.click();
+    analyze.click();
+    await flush();
+
+    expect(inspectCalls()).toHaveLength(1);
+    expect(inspectCalls()[0][0]).toMatch(/^\/api\/inspect\?upload_attempt_id=[A-Za-z0-9-]+$/);
+    expect(inspectCalls()[0][1].method).toBe("POST");
+    expect(inspectCalls()[0][1].body).toBeInstanceOf(FormData);
+    expect(inspectCalls()[0][1].headers).toBeUndefined();
+  });
+
+  it("labels a real multipart transport failure without claiming the user's network is broken", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    mockApi({ inspectError: new TypeError("Failed to fetch") });
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    document.getElementById("analyze-btn").click();
+    await flush();
+
+    const message = document.getElementById("job-error").textContent;
+    expect(message).toContain("Upload connection was interrupted");
+    expect(message).toContain("before Prometheus returned a response");
+    expect(message).toContain("No upload retry was made");
+    expect(message).toContain("Reference:");
+    expect(message).not.toContain("Check your connection");
+    expect(inspectCalls()).toHaveLength(1);
+  });
+
+  it("labels an aborted inspect upload as a timeout without retrying", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    mockApi({ inspectError: Object.assign(new Error("The operation was aborted."), { name: "AbortError" }) });
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    document.getElementById("analyze-btn").click();
+    await flush();
+
+    const message = document.getElementById("job-error").textContent;
+    expect(message).toContain("Upload timed out");
+    expect(message).toContain("No upload retry was made");
+    expect(message).toContain("Reference:");
+    expect(inspectCalls()).toHaveLength(1);
+  });
+
+  it("shows the server-provided queue position and clears it when the worker starts", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    mockApi({ jobStatuses: [
+      { state: "processing", stage: "Queued", queue_position: 2 },
+      { state: "processing", stage: "Queued", queue_position: 1 },
+      { state: "processing", stage: "Queued", queue_position: 0 },
+      { state: "processing", stage: "Starting analysis" },
+      { state: "complete", stage: "Complete" },
+    ] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+    document.getElementById("analyze-btn").click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.getElementById("phase-text").textContent).toBe("Queued");
+    expect(document.getElementById("phase-detail").textContent).toBe(
+      "2 jobs ahead of you. Your analysis will start automatically."
+    );
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(document.getElementById("phase-detail").textContent).toBe(
+      "1 job ahead of you. Your analysis will start automatically."
+    );
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(document.getElementById("phase-detail").textContent).toBe(
+      "You're next in the queue. Your analysis will start automatically."
+    );
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(document.getElementById("phase-text").textContent).toBe("Analyzing visual language");
+
+    await vi.advanceTimersByTimeAsync(1500);
   });
 
   it("honors the first upgrade click while Nimiq is still initializing", async () => {
@@ -388,7 +489,7 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("again-btn").click();
     chooseVideo("second.mp4");
-    await completeBasic("basic-2", 1);
+    await completeBasic();
     document.getElementById("upgrade-btn").click();
     await flush();
     const quoteCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes");

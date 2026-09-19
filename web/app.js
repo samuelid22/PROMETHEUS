@@ -398,9 +398,6 @@ function setFile(file) {
     selectedPreviewUrl = URL.createObjectURL(file);
     els.uploadPreview.src = selectedPreviewUrl;
   }
-  pendingPayment = null;
-  sourceJobId = null;
-  persistRecovery();
   els.uploadError.classList.add("hidden");
   els.dropzone.classList.add("hidden");
   els.fileCard.classList.remove("hidden");
@@ -476,60 +473,56 @@ async function startAnalysis(endpoint) {
   showScreen("processing");
   els.jobError.classList.add("hidden");
   els.retryBtn.classList.add("hidden");
-  els.uploadBar.style.width = "0%";
-  els.uploadProgress.setAttribute("aria-valuenow", "0");
+  els.uploadBar.style.width = "";
+  els.uploadProgress.classList.add("is-indeterminate");
+  els.uploadProgress.removeAttribute("aria-valuenow");
   renderSteps("uploading", false);
   els.phaseText.textContent = "Uploading video";
   els.phaseDetail.textContent = "Sending the file to the backend";
 
   const attemptId = createUploadAttemptId();
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", uploadAttemptUrl(endpoint, attemptId));
-  xhr.timeout = UPLOAD_TIMEOUT_MS;
-  xhr.upload.onprogress = (event) => {
-    if (!event.lengthComputable) return;
-    const percent = Math.round((event.loaded / event.total) * 100);
-    els.uploadBar.style.width = `${percent}%`;
-    els.uploadProgress.setAttribute("aria-valuenow", String(percent));
-    els.phaseDetail.textContent = `Uploading video — ${percent}%`;
-  };
-  xhr.onload = () => {
-    els.uploadBar.style.width = "100%";
-    els.uploadProgress.setAttribute("aria-valuenow", "100");
-    let data = {};
-    try { data = JSON.parse(xhr.responseText); } catch (err) { /* handled below */ }
-    if (xhr.status < 200 || xhr.status >= 300 || !data.job_id) {
-      actionBusy = false;
-      showError(els.jobError, `Could not start analysis: ${data.detail || `upload failed (${xhr.status})`}`);
-      els.retryBtn.classList.remove("hidden");
-      els.retryBtn.textContent = "Back to upload";
-      syncUploadButtons();
-      return;
-    }
-    currentJobId = data.job_id;
-    sourceJobId = data.job_id;
-    selectedFile = null;
+  const failUpload = (message) => {
     actionBusy = false;
-    persistRecovery();
-    startPolling(currentJobId);
-  };
-  xhr.onerror = () => {
-    actionBusy = false;
-    showError(els.jobError, `Upload connection was interrupted before Prometheus returned a response. No upload retry was made. Reference: ${attemptId}.`);
-    els.retryBtn.classList.remove("hidden");
-    els.retryBtn.textContent = "Back to upload";
-    syncUploadButtons();
-  };
-  xhr.ontimeout = () => {
-    actionBusy = false;
-    showError(els.jobError, `Upload timed out before Prometheus returned a response. No upload retry was made. Reference: ${attemptId}.`);
+    els.uploadProgress.classList.remove("is-indeterminate");
+    showError(els.jobError, message);
     els.retryBtn.classList.remove("hidden");
     els.retryBtn.textContent = "Back to upload";
     syncUploadButtons();
   };
   const form = new FormData();
   form.append("file", selectedFile);
-  xhr.send(form);
+  let response;
+  try {
+    // No Content-Type or upload listener: keep this FormData POST a simple CORS request.
+    response = await fetchWithTimeout(
+      uploadAttemptUrl(endpoint, attemptId),
+      { method: "POST", body: form },
+      UPLOAD_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const timedOut = error?.name === "AbortError";
+    failUpload(
+      timedOut
+        ? `Upload timed out before Prometheus returned a response. No upload retry was made. Reference: ${attemptId}.`
+        : `Upload connection was interrupted before Prometheus returned a response. No upload retry was made. Reference: ${attemptId}.`,
+    );
+    return;
+  }
+
+  els.uploadProgress.classList.remove("is-indeterminate");
+  els.uploadBar.style.width = "100%";
+  els.uploadProgress.setAttribute("aria-valuenow", "100");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.job_id) {
+    failUpload(`Could not start analysis: ${data.detail || `upload failed (${response.status})`}`);
+    return;
+  }
+  currentJobId = data.job_id;
+  sourceJobId = data.job_id;
+  selectedFile = null;
+  actionBusy = false;
+  persistRecovery();
+  startPolling(currentJobId);
 }
 
 async function startAdvancedAnalysis(payment) {
@@ -685,18 +678,28 @@ async function startPaidAnalysis(errorBox = els.uploadError) {
   }
 }
 
-function startPolling(jobId) {
+function startPolling(jobId, initialJob = null) {
   clearTimeout(pollTimer);
   pollFailures = 0;
   showScreen("processing");
   els.jobError.classList.add("hidden");
   els.retryBtn.classList.add("hidden");
+  if (initialJob) {
+    applyJobStatus(jobId, initialJob);
+    return;
+  }
   pollJob(jobId);
 }
 
 function schedulePoll(jobId, delay = 1500) {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(() => pollJob(jobId), delay);
+}
+
+function queueStatusText(position) {
+  if (position === 0) return "You're next in the queue. Your analysis will start automatically.";
+  const jobs = position === 1 ? "1 job ahead of you" : `${position} jobs ahead of you`;
+  return `${jobs}. Your analysis will start automatically.`;
 }
 
 async function pollJob(jobId) {
@@ -714,10 +717,9 @@ async function pollJobOnce(jobId) {
   let job;
   try {
     const response = await fetchWithTimeout(apiUrl(`/api/jobs/${jobId}`));
-    if (response.status === 404) {
-      currentJobId = null;
-      persistRecovery();
-      throw new Error("This analysis is no longer available on the server.");
+    if (response.status === 404 || response.status === 410) {
+      discardSavedJob();
+      return;
     }
     if (!response.ok) throw new Error(`Server returned ${response.status}.`);
     job = await response.json();
@@ -733,7 +735,19 @@ async function pollJobOnce(jobId) {
     els.retryBtn.classList.remove("hidden");
     return;
   }
+  await applyJobStatus(jobId, job);
+}
+
+async function applyJobStatus(jobId, job) {
+  if (jobId !== currentJobId) return;
   pollFailures = 0;
+  if (Number.isInteger(job.queue_position) && job.queue_position >= 0) {
+    els.phaseText.textContent = "Queued";
+    els.phaseDetail.textContent = queueStatusText(job.queue_position);
+    renderSteps("uploading", true);
+    schedulePoll(jobId);
+    return;
+  }
   const mapped = mapStage(job.stage || "");
   els.phaseText.textContent = PROCESS_STEPS.find((s) => s.id === mapped.step).label;
   els.phaseDetail.textContent = job.stage || "";
@@ -756,9 +770,25 @@ async function pollJobOnce(jobId) {
       els.retryBtn.textContent = "Back to upload";
       els.retryBtn.classList.remove("hidden");
     }
+  } else if (job.state !== "processing") {
+    discardSavedJob();
   } else {
     schedulePoll(jobId);
   }
+}
+
+function discardSavedJob() {
+  clearTimeout(pollTimer);
+  currentJobId = null;
+  sourceJobId = null;
+  currentResult = null;
+  pendingPayment = null;
+  savedJobId = null;
+  persistRecovery();
+  clearFile();
+  els.jobError.classList.add("hidden");
+  els.retryBtn.classList.add("hidden");
+  showScreen("upload");
 }
 
 async function fetchResult(jobId) {
@@ -1014,6 +1044,7 @@ els.againBtn.addEventListener("click", () => {
   currentJobId = null;
   sourceJobId = null;
   pendingPayment = null;
+  savedJobId = null;
   persistRecovery();
   showScreen("upload");
 });
