@@ -37,6 +37,17 @@ Render Free provides 512 MB RAM, can spin down after 15 minutes without inbound 
 
 Use short demo clips. The API enforces the existing 200 MB upload limit, but FFmpeg processing and the free instance's ephemeral disk make smaller videos more reliable.
 
+## Upload-path canary
+
+After `GET /api/health` and `GET /api/ready`, the Vercel frontend sends `POST /api/upload-ping` with a tiny `FormData` body (same origin and `fetch` style as inspect). Local Inspection enables only after that canary returns 204.
+
+- Canary logs: `upload_ping=…` (not `upload_attempt=`).
+- Real inspect logs and Reference IDs are unchanged.
+- A 404/405 from an older API is treated as “canary not supported”; Inspect still enables so a frontend/backend deploy race cannot freeze initialization.
+- Failed canaries show “Upload service is reconnecting…” and poll for about 100 seconds, then **Retry initialization**. Real video uploads are never auto-retried.
+
+Verify a cold start on the Vercel app: Inspect must stay disabled until Render logs `upload_ping` `lifecycle=response status=204`, then one short MP4 inspect should show `upload_attempt` `received` and `202`.
+
 ## Public verification
 
 1. Check `GET /api/health` on Render.
