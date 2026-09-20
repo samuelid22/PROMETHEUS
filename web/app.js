@@ -534,8 +534,15 @@ async function startAnalysis(endpoint) {
   }
   console.info(`upload_attempt=${attemptId} precheck=${precheck}${precheckError}`);
   if (precheck === "unreadable") {
+    // Proven by device testing: picker sources such as Gallery can hand out
+    // files whose bytes this browser context may not read, while the same
+    // video selected through Files uploads fine. Guide only those cases
+    // elsewhere; every other outcome keeps the previous behavior.
+    const reason = precheckErrorName === "NotReadableError" || precheckErrorName === "NotFoundError"
+      ? "This video couldn't be accessed through the selected source. Please select it again using Files or Browse instead of Gallery."
+      : "The selected video could not be read from this device before upload.";
     failUpload(
-      `The selected video could not be read from this device before upload (${precheckErrorName}). No upload was started and no retry was made. Reference: ${attemptId}.`,
+      `${reason} (${precheckErrorName}) No upload was started and no retry was made. Reference: ${attemptId}.`,
     );
     return;
   }

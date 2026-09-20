@@ -504,7 +504,8 @@ describe("basic inspection and per-job payment", () => {
 
     expect(inspectCalls(fetchMock)).toHaveLength(0);
     const message = document.getElementById("job-error").textContent;
-    expect(message).toContain("could not be read from this device");
+    expect(message).toContain("couldn't be accessed through the selected source");
+    expect(message).toContain("using Files or Browse instead of Gallery");
     expect(message).toContain("(NotReadableError)");
     expect(message).toContain("No upload was started");
     expect(message).toContain("Reference:");
@@ -513,6 +514,26 @@ describe("basic inspection and per-job payment", () => {
     expect(logged).toContain("NotReadableError");
     expect(logged).toContain("The file could not be read");
     expect(logged).not.toContain("clip.mp4");
+  });
+
+  it("shows the Files guidance for a NotFoundError read failure", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    const file = document.getElementById("file-input").files[0];
+    vi.spyOn(file, "slice").mockReturnValue({
+      arrayBuffer: () => Promise.reject(new DOMException("gone", "NotFoundError")),
+    });
+    document.getElementById("analyze-btn").click();
+    await flush();
+
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+    const message = document.getElementById("job-error").textContent;
+    expect(message).toContain("using Files or Browse instead of Gallery");
+    expect(message).toContain("(NotFoundError)");
+    expect(message).toContain("Reference:");
   });
 
   it("shows UnknownError when the read failure has no error name", async () => {
@@ -527,7 +548,10 @@ describe("basic inspection and per-job payment", () => {
     await flush();
 
     expect(inspectCalls(fetchMock)).toHaveLength(0);
-    expect(document.getElementById("job-error").textContent).toContain("(UnknownError)");
+    const message = document.getElementById("job-error").textContent;
+    expect(message).toContain("could not be read from this device");
+    expect(message).toContain("(UnknownError)");
+    expect(message).not.toContain("instead of Gallery");
   });
 
   it("proceeds with the upload when the file pre-check passes", async () => {
