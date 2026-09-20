@@ -495,7 +495,9 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     chooseVideo();
     const file = document.getElementById("file-input").files[0];
-    vi.spyOn(file, "slice").mockReturnValue({ arrayBuffer: () => Promise.reject(new Error("denied")) });
+    vi.spyOn(file, "slice").mockReturnValue({
+      arrayBuffer: () => Promise.reject(new DOMException("The file could not be read", "NotReadableError")),
+    });
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     document.getElementById("analyze-btn").click();
     await flush();
@@ -505,7 +507,11 @@ describe("basic inspection and per-job payment", () => {
     expect(message).toContain("could not be read from this device");
     expect(message).toContain("No upload was started");
     expect(message).toContain("Reference:");
-    expect(info).toHaveBeenCalledWith(expect.stringContaining("precheck=unreadable"));
+    const logged = info.mock.calls.map(([line]) => String(line)).join("\n");
+    expect(logged).toContain("precheck=unreadable");
+    expect(logged).toContain("NotReadableError");
+    expect(logged).toContain("The file could not be read");
+    expect(logged).not.toContain("clip.mp4");
   });
 
   it("proceeds with the upload when the file pre-check passes", async () => {
