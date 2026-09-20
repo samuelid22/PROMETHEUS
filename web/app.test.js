@@ -505,6 +505,7 @@ describe("basic inspection and per-job payment", () => {
     expect(inspectCalls(fetchMock)).toHaveLength(0);
     const message = document.getElementById("job-error").textContent;
     expect(message).toContain("could not be read from this device");
+    expect(message).toContain("(NotReadableError)");
     expect(message).toContain("No upload was started");
     expect(message).toContain("Reference:");
     const logged = info.mock.calls.map(([line]) => String(line)).join("\n");
@@ -512,6 +513,21 @@ describe("basic inspection and per-job payment", () => {
     expect(logged).toContain("NotReadableError");
     expect(logged).toContain("The file could not be read");
     expect(logged).not.toContain("clip.mp4");
+  });
+
+  it("shows UnknownError when the read failure has no error name", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    const file = document.getElementById("file-input").files[0];
+    vi.spyOn(file, "slice").mockReturnValue({ arrayBuffer: () => Promise.reject("boom") });
+    document.getElementById("analyze-btn").click();
+    await flush();
+
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+    expect(document.getElementById("job-error").textContent).toContain("(UnknownError)");
   });
 
   it("proceeds with the upload when the file pre-check passes", async () => {

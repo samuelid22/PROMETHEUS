@@ -520,6 +520,7 @@ async function startAnalysis(endpoint) {
   // absent the pre-check is skipped and the upload proceeds as before.
   let precheck = "skipped";
   let precheckError = "";
+  let precheckErrorName = "";
   try {
     const probe = selectedFile.slice(0, 64 * 1024);
     if (typeof probe.arrayBuffer === "function") {
@@ -528,12 +529,13 @@ async function startAnalysis(endpoint) {
     }
   } catch (error) {
     precheck = "unreadable";
+    precheckErrorName = error?.name || "UnknownError";
     precheckError = ` error=${error?.name || "unknown"} message=${String(error?.message ?? "").slice(0, 160)}`;
   }
   console.info(`upload_attempt=${attemptId} precheck=${precheck}${precheckError}`);
   if (precheck === "unreadable") {
     failUpload(
-      `The selected video could not be read from this device before upload. No upload was started and no retry was made. Reference: ${attemptId}.`,
+      `The selected video could not be read from this device before upload (${precheckErrorName}). No upload was started and no retry was made. Reference: ${attemptId}.`,
     );
     return;
   }
