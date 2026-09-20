@@ -514,6 +514,27 @@ async function startAnalysis(endpoint) {
     els.retryBtn.textContent = "Back to upload";
     syncUploadButtons();
   };
+  // Diagnostic pre-check only: prove the first bytes are readable before the
+  // request body is streamed. A passing pre-check says nothing about the rest
+  // of the file or whether the upload will succeed. Where the read API is
+  // absent the pre-check is skipped and the upload proceeds as before.
+  let precheck = "skipped";
+  try {
+    const probe = selectedFile.slice(0, 64 * 1024);
+    if (typeof probe.arrayBuffer === "function") {
+      await probe.arrayBuffer();
+      precheck = "readable";
+    }
+  } catch (error) {
+    precheck = "unreadable";
+  }
+  console.info(`upload_attempt=${attemptId} precheck=${precheck}`);
+  if (precheck === "unreadable") {
+    failUpload(
+      `The selected video could not be read from this device before upload. No upload was started and no retry was made. Reference: ${attemptId}.`,
+    );
+    return;
+  }
   const form = new FormData();
   form.append("file", selectedFile);
   let response;

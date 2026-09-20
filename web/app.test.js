@@ -488,6 +488,42 @@ describe("basic inspection and per-job payment", () => {
     expect(inspectCalls()).toHaveLength(1);
   });
 
+  it("blocks the upload when the file cannot be read, without contacting the backend", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    const file = document.getElementById("file-input").files[0];
+    vi.spyOn(file, "slice").mockReturnValue({ arrayBuffer: () => Promise.reject(new Error("denied")) });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    document.getElementById("analyze-btn").click();
+    await flush();
+
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+    const message = document.getElementById("job-error").textContent;
+    expect(message).toContain("could not be read from this device");
+    expect(message).toContain("No upload was started");
+    expect(message).toContain("Reference:");
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("precheck=unreadable"));
+  });
+
+  it("proceeds with the upload when the file pre-check passes", async () => {
+    initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    chooseVideo();
+    const file = document.getElementById("file-input").files[0];
+    vi.spyOn(file, "slice").mockReturnValue({ arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    document.getElementById("analyze-btn").click();
+    await flush();
+
+    expect(inspectCalls(fetchMock)).toHaveLength(1);
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("precheck=readable"));
+  });
+
   it("shows the server-provided queue position and clears it when the worker starts", async () => {
     vi.useFakeTimers();
     initMock.mockResolvedValue({ isConsensusEstablished: vi.fn(), sendBasicTransactionWithData: vi.fn() });
