@@ -4,13 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#090b14">
-<title>Prometheus — Creative video intelligence</title>
+<title>Prometheus Beta — Creative video intelligence</title>
 <link rel="icon" href="/prometheus-mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <header class="topbar">
-  <a class="brand" href="#screen-upload" aria-label="Prometheus home">
+  <a class="brand" href="#screen-upload" aria-label="Prometheus Beta home">
     <prometheus-logo class="brand-logo" variant="primary"></prometheus-logo>
   </a>
   <div class="topbar-meta">
@@ -25,7 +25,7 @@
     <div class="hero hero-upload">
       <p class="eyebrow">Creative intelligence studio</p>
       <h1>Find the visual language behind a video.</h1>
-      <p class="sub">Upload a clip and Prometheus turns its scenes, style, camera, and atmosphere into a creative recipe you can explore and remix.</p>
+      <p class="sub">Upload a clip and Prometheus Beta turns its scenes, style, camera, and atmosphere into a creative recipe you can explore and remix.</p>
     </div>
 
     <div class="upload-shell">
@@ -56,9 +56,10 @@
     <button id="analyze-btn" class="primary block analyze-action initializing" type="button" disabled><span>Initializing</span><small>Analysis service waking up</small></button>
     <button id="advanced-btn" class="secondary advanced-entry" type="button" disabled>Run free inspection first for advanced analysis</button>
     <div id="payment-status" class="payment-status" role="status" aria-live="polite">Connecting to Nimiq Pay&hellip;</div>
+    <button id="retry-init-btn" class="secondary hidden" type="button">Retry initialization</button>
     <div id="upload-error" class="error hidden" role="alert"></div>
 
-    <div class="workflow" aria-label="How Prometheus works">
+    <div class="workflow" aria-label="How Prometheus Beta works">
       <div class="workflow-step"><span>01</span><strong>Inspect</strong><small>Read the clip</small></div>
       <div class="workflow-step"><span>02</span><strong>Understand</strong><small>Map visual choices</small></div>
       <div class="workflow-step"><span>03</span><strong>Rebuild</strong><small>Shape the recipe</small></div>
@@ -132,7 +133,7 @@
     <div class="result-head remix-head">
       <p class="eyebrow">Creative controls</p>
       <h2>Remix the recipe.</h2>
-      <p class="sub">Change the creative attributes you want. Prometheus keeps the analyzed visual language as your starting point.</p>
+      <p class="sub">Change the creative attributes you want. Prometheus Beta keeps the analyzed visual language as your starting point.</p>
     </div>
 
     <div class="card source-card">
@@ -167,7 +168,7 @@
 
 </main>
 
-<footer class="footer"><span class="footer-mark" aria-hidden="true"></span> Prometheus · creative findings are reconstruction hypotheses, not measurements.</footer>
+<footer class="footer"><span class="footer-mark" aria-hidden="true"></span> Prometheus Beta · creative findings are reconstruction hypotheses, not measurements.</footer>
 <script type="module" src="/logo.js"></script>
 <script type="module" src="/app.js"></script>
 </body>

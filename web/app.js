@@ -65,6 +65,7 @@ const els = {
   analyzeBtn: document.getElementById("analyze-btn"),
   advancedBtn: document.getElementById("advanced-btn"),
   paymentStatus: document.getElementById("payment-status"),
+  retryInitBtn: document.getElementById("retry-init-btn"),
   uploadError: document.getElementById("upload-error"),
   phaseText: document.getElementById("phase-text"),
   phaseDetail: document.getElementById("phase-detail"),
@@ -179,12 +180,30 @@ function syncStartupState() {
   syncUploadButtons();
 }
 
+async function pingUploadPath() {
+  const pingId = createUploadAttemptId();
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob(["prometheus-upload-ping"], { type: "application/octet-stream" }),
+    "ping.bin",
+  );
+  const response = await fetchWithTimeout(
+    apiUrl(`/api/upload-ping?upload_ping_id=${encodeURIComponent(pingId)}`),
+    { method: "POST", body: form },
+  );
+  if (response.status === 204) return "ok";
+  if (response.status === 404 || response.status === 405) return "unsupported";
+  return "fail";
+}
+
 async function waitForApiReady() {
   if (apiReady) return true;
   if (apiReadyTask) return apiReadyTask;
 
   apiReadyTask = (async () => {
     const deadline = Date.now() + API_HEALTH_DEADLINE_MS;
+    els.retryInitBtn.classList.add("hidden");
     els.paymentStatus.classList.remove("ready");
     els.paymentStatus.textContent = "Starting Prometheus… The analysis service is waking up. This may take a moment.";
     syncStartupState();
@@ -201,9 +220,14 @@ async function waitForApiReady() {
           );
           const ready = await readyResponse.json().catch(() => ({}));
           if (readyResponse.ok && ready.status === "ready") {
-            apiReady = true;
+            const ping = await pingUploadPath();
+            if (ping === "ok" || ping === "unsupported") {
+              apiReady = true;
+              syncStartupState();
+              return true;
+            }
+            els.paymentStatus.textContent = "Upload service is reconnecting…";
             syncStartupState();
-            return true;
           }
         }
       } catch (error) {
@@ -219,6 +243,7 @@ async function waitForApiReady() {
     inspectLabel.textContent = "Service unavailable";
     inspectDetail.textContent = "Connection disrupted";
     els.paymentStatus.textContent = "Connection disrupted. The analysis service did not become ready. Try again shortly.";
+    els.retryInitBtn.classList.remove("hidden");
     syncUploadButtons();
     return false;
   })();
@@ -489,6 +514,38 @@ async function startAnalysis(endpoint) {
     els.retryBtn.textContent = "Back to upload";
     syncUploadButtons();
   };
+  // Diagnostic pre-check only: prove the first bytes are readable before the
+  // request body is streamed. A passing pre-check says nothing about the rest
+  // of the file or whether the upload will succeed. Where the read API is
+  // absent the pre-check is skipped and the upload proceeds as before.
+  let precheck = "skipped";
+  let precheckError = "";
+  let precheckErrorName = "";
+  try {
+    const probe = selectedFile.slice(0, 64 * 1024);
+    if (typeof probe.arrayBuffer === "function") {
+      await probe.arrayBuffer();
+      precheck = "readable";
+    }
+  } catch (error) {
+    precheck = "unreadable";
+    precheckErrorName = error?.name || "UnknownError";
+    precheckError = ` error=${error?.name || "unknown"} message=${String(error?.message ?? "").slice(0, 160)}`;
+  }
+  console.info(`upload_attempt=${attemptId} precheck=${precheck}${precheckError}`);
+  if (precheck === "unreadable") {
+    // Proven by device testing: picker sources such as Gallery can hand out
+    // files whose bytes this browser context may not read, while the same
+    // video selected through Files uploads fine. Guide only those cases
+    // elsewhere; every other outcome keeps the previous behavior.
+    const reason = precheckErrorName === "NotReadableError" || precheckErrorName === "NotFoundError"
+      ? "This video couldn't be accessed through the selected source. Please select it again using Files or Browse instead of Gallery."
+      : "The selected video could not be read from this device before upload.";
+    failUpload(
+      `${reason} (${precheckErrorName}) No upload was started and no retry was made. Reference: ${attemptId}.`,
+    );
+    return;
+  }
   const form = new FormData();
   form.append("file", selectedFile);
   let response;
@@ -1024,6 +1081,10 @@ els.fileInput.addEventListener("change", () => {
   if (els.fileInput.files && els.fileInput.files[0]) setFile(els.fileInput.files[0]);
 });
 els.fileClear.addEventListener("click", clearFile);
+els.retryInitBtn.addEventListener("click", () => {
+  if (apiReady || apiReadyTask) return;
+  void waitForApiReady();
+});
 els.analyzeBtn.addEventListener("click", () => startAnalysis("/api/inspect"));
 els.advancedBtn.addEventListener("click", () => startPaidAnalysis());
 els.upgradeBtn.addEventListener("click", () => startPaidAnalysis(els.upgradeError));
