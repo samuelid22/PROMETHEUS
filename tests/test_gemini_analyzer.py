@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from prometheus.analysis.analyzer import GeminiAnalyzer, create_analyzer
+from prometheus.analysis.analyzer import (
+    TOTAL_RETRY_DELAY_BUDGET_SECONDS,
+    GeminiAnalyzer,
+    create_analyzer,
+)
 from prometheus.config import AnalyzerConfig
 from prometheus.errors import PrometheusError
 from prometheus.video.sampler import SampledFrame
@@ -157,3 +161,71 @@ def test_rate_limit_exhaustion_raises(monkeypatch, fake_frames):
     with pytest.raises(PrometheusError, match="after 6 attempts"):
         analyzer.analyze(_metadata(), fake_frames)
     assert client.models.calls == 6
+
+
+def test_cumulative_budget_shared_across_sequential_calls(monkeypatch, fake_frames):
+    import prometheus.analysis.analyzer as analyzer_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", sleeps.append)
+    monkeypatch.setattr(analyzer_module.random, "uniform", lambda a, b: 0.0)
+    client = FakeClient(lambda _: FakeAPIError(503))
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    for _ in range(3):
+        with pytest.raises(PrometheusError, match="after 6 attempts"):
+            analyzer.analyze(_metadata(), fake_frames)
+    assert sleeps == [2.0, 4.0, 8.0, 16.0, 30.0, 2.0, 4.0, 8.0, 16.0, 30.0]
+    assert sum(sleeps) == TOTAL_RETRY_DELAY_BUDGET_SECONDS == 120.0
+    assert analyzer._retry_delay_spent == 120.0
+    assert client.models.calls == 6 + 6 + 1
+
+
+def test_cumulative_budget_never_exceeds_limit_with_jitter(monkeypatch, fake_frames):
+    import prometheus.analysis.analyzer as analyzer_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", sleeps.append)
+    monkeypatch.setattr(analyzer_module.random, "uniform", lambda a, b: 1.0)
+    client = FakeClient(lambda _: FakeAPIError(503))
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    with pytest.raises(PrometheusError, match="after 6 attempts"):
+        analyzer.analyze(_metadata(), fake_frames)
+    with pytest.raises(PrometheusError, match="after 6 attempts"):
+        analyzer.analyze(_metadata(), fake_frames)
+    assert sleeps == [3.0, 5.0, 9.0, 17.0, 31.0, 3.0, 5.0, 9.0, 17.0]
+    assert sum(sleeps) == 99.0 <= TOTAL_RETRY_DELAY_BUDGET_SECONDS
+    assert analyzer._retry_delay_spent == 99.0
+    assert client.models.calls == 6 + 5
+
+
+def test_new_analyzer_starts_with_fresh_budget(monkeypatch, fake_frames):
+    import prometheus.analysis.analyzer as analyzer_module
+
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
+    monkeypatch.setattr(analyzer_module.random, "uniform", lambda a, b: 0.0)
+    first = GeminiAnalyzer(api_key="test-key", client=FakeClient(lambda _: FakeAPIError(503)))
+    with pytest.raises(PrometheusError, match="after 6 attempts"):
+        first.analyze(_metadata(), fake_frames)
+    assert first._retry_delay_spent == 60.0
+    second = GeminiAnalyzer(api_key="test-key", client=FakeClient(lambda _: FakeAPIError(503)))
+    assert second._retry_delay_spent == 0.0
+    with pytest.raises(PrometheusError, match="after 6 attempts"):
+        second.analyze(_metadata(), fake_frames)
+    assert second._retry_delay_spent == 60.0
+
+
+def test_output_regeneration_counts_toward_budget_and_unchanged(monkeypatch, fake_frames):
+    import prometheus.analysis.analyzer as analyzer_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", sleeps.append)
+    monkeypatch.setattr(analyzer_module.random, "uniform", lambda a, b: 1.0)
+    client = FakeClient(
+        lambda call: FakeResponse("{not json") if call == 1 else FakeResponse(VALID_JSON)
+    )
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    report = analyzer.analyze(_metadata(), fake_frames)
+    assert report.summary == "A generated test scene."
+    assert client.models.calls == 2
+    assert sleeps == [2.0]
+    assert analyzer._retry_delay_spent == 2.0

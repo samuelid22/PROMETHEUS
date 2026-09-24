@@ -32,6 +32,11 @@ BACKOFF_BASE_SECONDS = 2.0
 # reported here and in the handoff/commit message, not applied silently.
 BACKOFF_MAX_SECONDS = 30.0
 JITTER_MAX_SECONDS = 1.0
+# Cumulative retry-sleep budget shared by every Gemini call made through one
+# analyzer instance. A pipeline builds one analyzer per analysis job, so this
+# bounds total retry delays per analysis (not per call). First attempts never
+# consume budget; only retry sleeps (API-error and output-regeneration) count.
+TOTAL_RETRY_DELAY_BUDGET_SECONDS = 120.0
 
 SceneContext = list[dict[str, Any]]
 
@@ -122,6 +127,10 @@ class _BaseRemoteAnalyzer(MultimodalAnalyzer):
     def __init__(self, provider: str, model: str):
         self._provider = provider
         self._model = model
+        # Cumulative retry sleep consumed by this instance. Each analysis job
+        # gets a new analyzer (and therefore a fresh budget); calls on one
+        # instance run sequentially on the single worker, so no lock is needed.
+        self._retry_delay_spent = 0.0
 
     @property
     def provenance(self) -> dict[str, str]:
@@ -175,9 +184,13 @@ class _BaseRemoteAnalyzer(MultimodalAnalyzer):
             if last_error_was_output:
                 # Preserve the previous ModelOutputError delay exactly:
                 # fixed 2/4/8s, no jitter, no Retry-After.
-                time.sleep(BACKOFF_BASE_SECONDS * (2**attempt))
+                delay = BACKOFF_BASE_SECONDS * (2**attempt)
             else:
-                time.sleep(_backoff_delay_seconds(attempt, last_error))
+                delay = _backoff_delay_seconds(attempt, last_error)
+            if delay > TOTAL_RETRY_DELAY_BUDGET_SECONDS - self._retry_delay_spent:
+                break
+            time.sleep(delay)
+            self._retry_delay_spent += delay
         if last_error_was_output:
             raise PrometheusError(
                 f"{self._provider} returned unusable analysis output after {MAX_RETRIES + 1} attempts: "
