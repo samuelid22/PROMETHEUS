@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -21,10 +22,22 @@ from prometheus.video.sampler import SampledFrame
 from prometheus.video.segmenter import Scene
 
 RETRYABLE_STATUS_CODES = (429, 500, 503)
+# Output-regeneration budget (ModelOutputError): unchanged, 4 attempts.
 MAX_RETRIES = 3
+# Retryable API-error budget (429/500/503 incl. 503 UNAVAILABLE): 6 attempts.
+MAX_API_RETRIES = 5
 BACKOFF_BASE_SECONDS = 2.0
+# Per-sleep cap, including server Retry-After values: delays longer than
+# 30s are capped at 30s (plus up to 1s jitter) to stay bounded. This cap is
+# reported here and in the handoff/commit message, not applied silently.
+BACKOFF_MAX_SECONDS = 30.0
+JITTER_MAX_SECONDS = 1.0
 
 SceneContext = list[dict[str, Any]]
+
+
+class ModelOutputError(PrometheusError):
+    """A model response was received but cannot be used as an analysis."""
 
 
 class MultimodalAnalyzer(ABC):
@@ -122,40 +135,56 @@ class _BaseRemoteAnalyzer(MultimodalAnalyzer):
     ) -> AnalysisReport:
         if not frames:
             raise PrometheusError("Cannot analyze an empty frame set")
-        raw = self._request_with_retries(
-            lambda: self._call_model(metadata, frames, scene_context)
+        return self._generate_with_retries(
+            lambda: self._call_model(metadata, frames, scene_context),
+            lambda raw: self._parse_report(raw, metadata, frames),
         )
-        report = self._parse_report(raw, metadata, frames)
-        report.validate()
-        return report
 
     def analyze_scene(
         self, metadata: VideoMetadata, scene: Scene, frames: list[SampledFrame]
     ) -> SceneAnalysis:
         if not frames:
             raise PrometheusError(f"Cannot analyze scene {scene.index} without frames")
-        raw = self._request_with_retries(
-            lambda: self._call_scene_model(metadata, scene, frames)
+        return self._generate_with_retries(
+            lambda: self._call_scene_model(metadata, scene, frames),
+            lambda raw: self._parse_scene_report(raw, scene),
         )
-        analysis = self._parse_scene_report(raw, scene)
-        analysis.validate()
-        return analysis
 
-    def _request_with_retries(self, call: Callable[[], str]) -> str:
+    def _generate_with_retries(
+        self, call: Callable[[], str], parse: Callable[[str], Any]
+    ) -> Any:
         last_error: Exception | None = None
-        for attempt in range(MAX_RETRIES + 1):
+        last_error_was_output = False
+        for attempt in range(MAX_API_RETRIES + 1):
             try:
-                return call()
+                return parse(call())
+            except ModelOutputError as exc:
+                last_error = exc
+                last_error_was_output = True
+                if attempt >= MAX_RETRIES:
+                    break
             except PrometheusError:
                 raise
             except Exception as exc:
                 if not _is_retryable(exc):
                     raise _wrap_api_error(self._provider, exc) from exc
                 last_error = exc
-                if attempt < MAX_RETRIES:
-                    time.sleep(BACKOFF_BASE_SECONDS * (2**attempt))
+                last_error_was_output = False
+                if attempt >= MAX_API_RETRIES:
+                    break
+            if last_error_was_output:
+                # Preserve the previous ModelOutputError delay exactly:
+                # fixed 2/4/8s, no jitter, no Retry-After.
+                time.sleep(BACKOFF_BASE_SECONDS * (2**attempt))
+            else:
+                time.sleep(_backoff_delay_seconds(attempt, last_error))
+        if last_error_was_output:
+            raise PrometheusError(
+                f"{self._provider} returned unusable analysis output after {MAX_RETRIES + 1} attempts: "
+                f"{last_error}"
+            )
         raise PrometheusError(
-            f"{self._provider} API kept failing after {MAX_RETRIES + 1} attempts "
+            f"{self._provider} API kept failing after {MAX_API_RETRIES + 1} attempts "
             f"(rate limit or server error): {last_error}"
         )
 
@@ -179,14 +208,22 @@ class _BaseRemoteAnalyzer(MultimodalAnalyzer):
         try:
             report = AnalysisReport.from_dict(data)
         except PrometheusError as exc:
-            raise PrometheusError(f"{self._provider} returned an invalid analysis structure: {exc}") from exc
+            raise ModelOutputError(
+                f"{self._provider} returned an invalid analysis structure: {exc}"
+            ) from exc
         if all(not f.observations and not f.inferences for f in report.categories.values()):
-            raise PrometheusError(
+            raise ModelOutputError(
                 f"{self._provider} returned JSON but every category was empty; refusing to save an empty analysis"
             )
         report.video_metadata = metadata.to_dict()
         report.frames = [f.to_dict() for f in frames]
         report.analyzer = self.provenance
+        try:
+            report.validate()
+        except PrometheusError as exc:
+            raise ModelOutputError(
+                f"{self._provider} returned an invalid analysis structure: {exc}"
+            ) from exc
         return report
 
     def _parse_scene_report(self, raw: str, scene: Scene) -> SceneAnalysis:
@@ -194,22 +231,28 @@ class _BaseRemoteAnalyzer(MultimodalAnalyzer):
         try:
             analysis = SceneAnalysis.from_dict(data, scene)
         except PrometheusError as exc:
-            raise PrometheusError(
+            raise ModelOutputError(
                 f"{self._provider} returned an invalid scene analysis structure: {exc}"
             ) from exc
         analysis.analyzer = self.provenance
+        try:
+            analysis.validate()
+        except PrometheusError as exc:
+            raise ModelOutputError(
+                f"{self._provider} returned an invalid scene analysis structure: {exc}"
+            ) from exc
         return analysis
 
     def _load_json(self, raw: str) -> Any:
         if not raw or not raw.strip():
-            raise PrometheusError(
+            raise ModelOutputError(
                 f"{self._provider} returned no content for the analysis request "
                 "(the response may have been blocked or empty)"
             )
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise PrometheusError(
+            raise ModelOutputError(
                 f"{self._provider} returned malformed JSON: {exc}. First 200 chars: {raw[:200]!r}"
             ) from exc
 
@@ -420,7 +463,7 @@ class GeminiAnalyzer(_BaseRemoteAnalyzer):
         feedback = getattr(response, "prompt_feedback", None)
         if feedback is not None:
             reason += f"; prompt feedback: {feedback}"
-        raise PrometheusError(f"Gemini returned no text content (finish reason: {reason})")
+        raise ModelOutputError(f"Gemini returned no text content (finish reason: {reason})")
 
 
 def _resolve_api_key(env_names: tuple[str, ...], provider: str) -> str:
@@ -441,6 +484,52 @@ def _is_retryable(exc: Exception) -> bool:
         return True
     status = getattr(exc, "status_code", None)
     return isinstance(status, int) and status in RETRYABLE_STATUS_CODES
+
+
+def _retry_after_seconds(exc: Exception | None) -> float | None:
+    if exc is None:
+        return None
+    for attr in ("retry_after", "retry_after_seconds"):
+        value = getattr(exc, attr, None)
+        parsed = _parse_retry_after_value(value)
+        if parsed is not None:
+            return min(parsed, BACKOFF_MAX_SECONDS)
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            getter = getattr(headers, "get", None)
+            raw = getter("retry-after") if callable(getter) else None
+        except Exception:
+            raw = None
+        parsed = _parse_retry_after_value(raw)
+        if parsed is not None:
+            return min(parsed, BACKOFF_MAX_SECONDS)
+    return None
+
+
+def _parse_retry_after_value(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.lower().endswith("s"):
+        text = text[:-1].strip()
+    try:
+        return max(0.0, float(text.split()[0]))
+    except (ValueError, IndexError):
+        return None
+
+
+def _backoff_delay_seconds(attempt: int, exc: Exception | None = None) -> float:
+    base = min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS * (2**attempt))
+    retry_after = _retry_after_seconds(exc)
+    if retry_after is not None:
+        base = min(BACKOFF_MAX_SECONDS, max(base, retry_after))
+    return base + random.uniform(0, JITTER_MAX_SECONDS)
 
 
 def _wrap_api_error(provider: str, exc: Exception) -> PrometheusError:

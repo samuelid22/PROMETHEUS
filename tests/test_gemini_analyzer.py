@@ -92,26 +92,43 @@ def test_scene_context_passed_to_global_call(fake_frames):
     assert any("A cube on a desk." in text for text in seen_prompts)
 
 
-def test_malformed_json_raises_clear_error(fake_frames):
+def test_malformed_json_is_regenerated_before_failing(fake_frames, monkeypatch):
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
+    client = FakeClient(
+        lambda call: FakeResponse("{not json") if call == 1 else FakeResponse(VALID_JSON)
+    )
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    report = analyzer.analyze(_metadata(), fake_frames)
+    assert report.summary == "A generated test scene."
+    assert client.models.calls == 2
+
+
+def test_persistently_malformed_json_fails_after_regeneration_attempts(fake_frames, monkeypatch):
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
     client = FakeClient(lambda _: FakeResponse("{not json"))
     analyzer = GeminiAnalyzer(api_key="test-key", client=client)
-    with pytest.raises(PrometheusError, match="malformed JSON"):
+    with pytest.raises(PrometheusError, match="unusable analysis output after 4 attempts.*malformed JSON"):
         analyzer.analyze(_metadata(), fake_frames)
+    assert client.models.calls == 4
 
 
-def test_empty_response_raises_with_finish_reason(fake_frames):
+def test_empty_response_is_regenerated_then_fails_with_finish_reason(fake_frames, monkeypatch):
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
     client = FakeClient(lambda _: FakeResponse(None, finish_reason="SAFETY"))
     analyzer = GeminiAnalyzer(api_key="test-key", client=client)
-    with pytest.raises(PrometheusError, match="no text content.*SAFETY"):
+    with pytest.raises(PrometheusError, match="unusable analysis output after 4 attempts.*no text content.*SAFETY"):
         analyzer.analyze(_metadata(), fake_frames)
+    assert client.models.calls == 4
 
 
-def test_all_empty_categories_rejected(fake_frames):
+def test_all_empty_categories_are_regenerated_then_rejected(fake_frames, monkeypatch):
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
     empty = json.dumps({"summary": "s", "categories": {}})
     client = FakeClient(lambda _: FakeResponse(empty))
     analyzer = GeminiAnalyzer(api_key="test-key", client=client)
-    with pytest.raises(PrometheusError, match="every category was empty"):
+    with pytest.raises(PrometheusError, match="unusable analysis output after 4 attempts.*every category was empty"):
         analyzer.analyze(_metadata(), fake_frames)
+    assert client.models.calls == 4
 
 
 def test_retries_on_rate_limit_then_succeeds(monkeypatch, fake_frames):
@@ -137,6 +154,6 @@ def test_rate_limit_exhaustion_raises(monkeypatch, fake_frames):
     monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
     client = FakeClient(lambda _: FakeAPIError(429))
     analyzer = GeminiAnalyzer(api_key="test-key", client=client)
-    with pytest.raises(PrometheusError, match="after 4 attempts"):
+    with pytest.raises(PrometheusError, match="after 6 attempts"):
         analyzer.analyze(_metadata(), fake_frames)
-    assert client.models.calls == 4
+    assert client.models.calls == 6
