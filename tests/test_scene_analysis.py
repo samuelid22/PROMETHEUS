@@ -65,11 +65,48 @@ def test_scene_empty_analysis_rejected(fake_frames):
         analyzer.analyze_scene(_metadata(), _scene(), fake_frames)
 
 
-def test_scene_malformed_json_rejected(fake_frames):
-    client = FakeClient(lambda _: FakeResponse("{oops"))
+def test_scene_malformed_json_is_regenerated(fake_frames, monkeypatch):
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
+    client = FakeClient(
+        lambda call: FakeResponse("{oops") if call == 1 else FakeResponse(VALID_SCENE_JSON)
+    )
     analyzer = GeminiAnalyzer(api_key="test-key", client=client)
-    with pytest.raises(PrometheusError, match="malformed JSON"):
-        analyzer.analyze_scene(_metadata(), _scene(), fake_frames)
+    analysis = analyzer.analyze_scene(_metadata(), _scene(), fake_frames)
+    assert analysis.description == "A red cube rotating on a dark desk while a lamp swings."
+    assert client.models.calls == 2
+
+
+def test_scene_request_includes_response_schema(fake_frames):
+    from google.genai import types
+
+    client = FakeClient(lambda _: FakeResponse(VALID_SCENE_JSON))
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    analyzer.analyze_scene(_metadata(), _scene(), fake_frames)
+    config = client.models.last_kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    schema = config.response_schema
+    assert schema.type == types.Type.OBJECT
+    assert set(schema.properties) == {"description", "categories"}
+    assert schema.properties["description"].type == types.Type.STRING
+    categories = schema.properties["categories"]
+    assert categories.type == types.Type.OBJECT
+    assert set(categories.properties) == set(SCENE_CATEGORY_KEYS)
+    assert not schema.required
+    finding = categories.properties["subjects"]
+    assert finding.properties["observations"].type == types.Type.ARRAY
+    assert finding.properties["confidence"].type == types.Type.NUMBER
+
+
+def test_scene_description_only_parses(fake_frames):
+    import json as json_module
+
+    client = FakeClient(
+        lambda _: FakeResponse(json_module.dumps({"description": "A red cube on a desk."}))
+    )
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    analysis = analyzer.analyze_scene(_metadata(), _scene(), fake_frames)
+    assert analysis.description == "A red cube on a desk."
+    analysis.validate()
 
 
 def test_mock_scene_analysis(fake_frames):

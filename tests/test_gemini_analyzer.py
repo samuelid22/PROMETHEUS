@@ -229,3 +229,61 @@ def test_output_regeneration_counts_toward_budget_and_unchanged(monkeypatch, fak
     assert client.models.calls == 2
     assert sleeps == [2.0]
     assert analyzer._retry_delay_spent == 2.0
+
+
+def test_global_request_includes_response_schema(fake_frames):
+    from google.genai import types
+
+    from prometheus.analysis.schema import CATEGORY_KEYS
+
+    client = FakeClient(lambda _: FakeResponse(VALID_JSON))
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    analyzer.analyze(_metadata(), fake_frames)
+    config = client.models.last_kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    schema = config.response_schema
+    assert schema.type == types.Type.OBJECT
+    assert set(schema.properties) == {"summary", "categories"}
+    assert schema.properties["summary"].type == types.Type.STRING
+    categories = schema.properties["categories"]
+    assert categories.type == types.Type.OBJECT
+    assert set(categories.properties) == set(CATEGORY_KEYS)
+    assert schema.required == ["categories"]
+    finding = categories.properties["subject"]
+    assert finding.type == types.Type.OBJECT
+    assert finding.properties["observations"].type == types.Type.ARRAY
+    assert finding.properties["observations"].items.type == types.Type.STRING
+    assert finding.properties["inferences"].type == types.Type.ARRAY
+    assert finding.properties["inferences"].items.type == types.Type.STRING
+    assert finding.properties["confidence"].type == types.Type.NUMBER
+    assert not finding.required
+
+
+def test_global_schema_subset_parses(fake_frames):
+    payload = json.dumps({
+        "summary": "A minimal valid scene.",
+        "categories": {
+            "subject": {
+                "observations": ["OBSERVATION: red cube centered at t=0.5s"],
+                "inferences": ["INFERENCE: the cube is likely the hero subject"],
+                "confidence": 0.9,
+            },
+        },
+    })
+    client = FakeClient(lambda _: FakeResponse(payload))
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    report = analyzer.analyze(_metadata(), fake_frames)
+    assert report.summary == "A minimal valid scene."
+    assert report.finding("subject").confidence == 0.9
+    assert report.finding("lighting").observations == []
+    assert report.finding("lighting").confidence == 0.0
+    report.validate()
+
+
+def test_global_missing_categories_rejected_after_retries(monkeypatch, fake_frames):
+    monkeypatch.setattr("prometheus.analysis.analyzer.time.sleep", lambda _: None)
+    client = FakeClient(lambda _: FakeResponse(json.dumps({"summary": "no categories"})))
+    analyzer = GeminiAnalyzer(api_key="test-key", client=client)
+    with pytest.raises(PrometheusError, match="unusable analysis output after 4 attempts"):
+        analyzer.analyze(_metadata(), fake_frames)
+    assert client.models.calls == 4

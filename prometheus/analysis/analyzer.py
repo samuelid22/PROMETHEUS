@@ -421,7 +421,7 @@ class GeminiAnalyzer(_BaseRemoteAnalyzer):
         response = self._api_client.models.generate_content(
             model=self._model,
             contents=parts,
-            config=self._config(SYSTEM_PROMPT),
+            config=self._config(SYSTEM_PROMPT, _global_response_schema()),
         )
         return self._extract_text(response)
 
@@ -438,17 +438,18 @@ class GeminiAnalyzer(_BaseRemoteAnalyzer):
         response = self._api_client.models.generate_content(
             model=self._model,
             contents=parts,
-            config=self._config(SCENE_SYSTEM_PROMPT),
+            config=self._config(SCENE_SYSTEM_PROMPT, _scene_response_schema()),
         )
         return self._extract_text(response)
 
     @staticmethod
-    def _config(system_prompt: str) -> Any:
+    def _config(system_prompt: str, response_schema: Any) -> Any:
         from google.genai import types
 
         return types.GenerateContentConfig(
             system_instruction=system_prompt,
             response_mime_type="application/json",
+            response_schema=response_schema,
             temperature=0.2,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
@@ -548,6 +549,76 @@ def _backoff_delay_seconds(attempt: int, exc: Exception | None = None) -> float:
 def _wrap_api_error(provider: str, exc: Exception) -> PrometheusError:
     message = str(exc) or exc.__class__.__name__
     return PrometheusError(f"{provider} API request failed: {message}")
+
+
+def _category_finding_schema() -> Any:
+    """Schema for one {observations, inferences, confidence} finding.
+
+    Mirrors CategoryFinding parsing: every member is optional because the
+    parser defaults missing observations/inferences to [] and confidence to
+    0.0. No numeric bounds are set because the parser clamps confidence into
+    [0, 1] itself.
+    """
+    from google.genai import types
+
+    return types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "observations": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(type=types.Type.STRING),
+            ),
+            "inferences": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(type=types.Type.STRING),
+            ),
+            "confidence": types.Schema(type=types.Type.NUMBER),
+        },
+    )
+
+
+def _global_response_schema() -> Any:
+    """Schema for global analysis output; mirrors AnalysisReport.from_dict.
+
+    Only 'categories' is required: every parser-accepted report carries
+    non-empty categories (a missing or fully empty mapping is rejected
+    downstream), while 'summary' and individual category keys stay optional
+    because the parser defaults them.
+    """
+    from google.genai import types
+
+    return types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "summary": types.Schema(type=types.Type.STRING),
+            "categories": types.Schema(
+                type=types.Type.OBJECT,
+                properties={spec.key: _category_finding_schema() for spec in CATEGORIES},
+            ),
+        },
+        required=["categories"],
+    )
+
+
+def _scene_response_schema() -> Any:
+    """Schema for scene analysis output; mirrors SceneAnalysis.from_dict.
+
+    Nothing is required: a description-only scene analysis is valid and the
+    parser defaults missing categories, so requiring keys could reject
+    previously valid outputs.
+    """
+    from google.genai import types
+
+    return types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "description": types.Schema(type=types.Type.STRING),
+            "categories": types.Schema(
+                type=types.Type.OBJECT,
+                properties={key: _category_finding_schema() for key in SCENE_CATEGORY_KEYS},
+            ),
+        },
+    )
 
 
 def create_analyzer(config: AnalyzerConfig) -> MultimodalAnalyzer:
