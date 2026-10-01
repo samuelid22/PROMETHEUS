@@ -921,7 +921,7 @@ function renderResults(result) {
     els.resAnalyzer.textContent = "MOCK MODE — placeholder findings, no vision model was used.";
   } else {
     els.resAnalyzer.className = "analyzer";
-    els.resAnalyzer.textContent = `Real vision model: ${analyzer.provider || "?"} / ${analyzer.model || "?"}`;
+    els.resAnalyzer.textContent = "Prometheus Analysis Engine";
   }
   if (video.preview_url) {
     els.resVideo.src = apiUrl(video.preview_url);

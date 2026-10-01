@@ -68,7 +68,7 @@ function basicResult(id) {
 function advancedResult(id) {
   return {
     job_id: id, tier: "advanced", video: { name: "clip.mp4", duration: 1, width: 320, height: 180, fps: 24 },
-    analyzer: { mode: "real", provider: "gemini", model: "test" },
+    analyzer: { mode: "real", provider: "gemini", model: "gemini-flash-lite-latest" },
     summary: "Advanced result", scenes: [], breakdown: [], prompt_markdown: "Reconstructed prompt",
   };
 }
@@ -649,6 +649,7 @@ describe("basic inspection and per-job payment", () => {
     const analyzeRequest = fetchMock.mock.calls.find(([url]) => url === "/api/analyze");
     expect(analyzeRequest[1].body.get("source_job_id")).toBe("basic-1");
     expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(document.getElementById("res-analyzer").textContent).toBe("Prometheus Analysis Engine");
     expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).payment).toBeNull();
     document.getElementById("remix-btn").click();
     document.querySelector("#remix-fields textarea").value = "dragon";
