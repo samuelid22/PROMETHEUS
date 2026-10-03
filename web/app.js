@@ -10,6 +10,9 @@ const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const CONSENSUS_ATTEMPTS = 15;
 const API_HEALTH_RETRY_MS = 2000;
 const API_HEALTH_DEADLINE_MS = 100000;
+// Public, read-only Testnet RPC already used as the project's backend default.
+// Keep separate from the injected wallet's network: getNetwork() reports only "nimiq".
+const WALLET_TESTNET_RPC_URL = "https://rpc.testnet.nimiqwatch.com/";
 
 const PROCESS_STEPS = [
   { id: "uploading", label: "Uploading" },
@@ -55,6 +58,17 @@ const screens = {
 };
 
 const els = {
+  walletSession: document.getElementById("wallet-session"),
+  walletConnect: document.getElementById("wallet-connect"),
+  walletPopover: document.getElementById("wallet-popover"),
+  walletHeading: document.getElementById("wallet-heading"),
+  walletDetails: document.getElementById("wallet-details"),
+  walletAddress: document.getElementById("wallet-address"),
+  walletBalance: document.getElementById("wallet-balance"),
+  walletConsensus: document.getElementById("wallet-consensus"),
+  walletMessage: document.getElementById("wallet-message"),
+  walletDisconnect: document.getElementById("wallet-disconnect"),
+  walletDisconnectNote: document.getElementById("wallet-disconnect-note"),
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
   fileCard: document.getElementById("file-card"),
@@ -117,6 +131,13 @@ let paymentConfig = null;
 let nimiqPromise = null;
 let nimiqReady = false;
 let nimiqInitTask = null;
+// Wallet display is memory-only and never enters payment recovery or backend requests.
+let walletAddress = null;
+let walletBalanceLuna = null;
+let walletConsensus = false;
+let walletConnecting = false;
+let walletSession = 0;
+let walletMessage = "";
 let apiReady = false;
 let apiReadyTask = null;
 let pendingPayment = recovery.payment || null;
@@ -330,6 +351,157 @@ function syncUploadButtons() {
   els.upgradeBtn.disabled = actionBusy || currentResult?.tier !== "basic";
 }
 
+function getNimiqProvider() {
+  if (!nimiqPromise) {
+    nimiqPromise = init({ timeout: 10000 }).catch((error) => {
+      nimiqPromise = null;
+      throw error;
+    });
+  }
+  return nimiqPromise;
+}
+
+function setWalletPopover(open) {
+  els.walletPopover.classList.toggle("hidden", !open);
+  els.walletConnect.setAttribute("aria-expanded", String(open));
+}
+
+function renderWallet() {
+  els.walletConnect.disabled = walletConnecting;
+  els.walletConnect.setAttribute("aria-busy", String(walletConnecting));
+  els.walletConnect.textContent = walletConnecting ? "Connecting…" : "Connect";
+  if (walletAddress && !walletConnecting) {
+    const compact = walletAddress.replace(/\s+/g, "");
+    const balance = document.createElement("span");
+    balance.className = "wallet-label-balance";
+    balance.textContent = walletBalanceLuna === null ? "Balance unavailable" : formatWalletBalance(walletBalanceLuna);
+    const address = document.createElement("span");
+    address.className = "wallet-label-address";
+    address.textContent = `${compact.slice(0, 4)}…${compact.slice(-4)}`;
+    els.walletConnect.replaceChildren(balance, document.createTextNode(" · "), address);
+  }
+  els.walletHeading.textContent = walletAddress ? "Connected wallet" : "Wallet connection";
+  els.walletDetails.classList.toggle("hidden", !walletAddress);
+  els.walletAddress.textContent = walletAddress || "";
+  els.walletBalance.textContent = walletBalanceLuna === null ? "Balance unavailable" : formatWalletBalance(walletBalanceLuna);
+  els.walletConsensus.textContent = walletConsensus ? "Connected" : "Not established";
+  els.walletMessage.textContent = walletMessage;
+  els.walletDisconnect.classList.toggle("hidden", !walletAddress);
+  els.walletDisconnectNote.classList.toggle("hidden", !walletAddress);
+}
+
+function formatWalletBalance(luna) {
+  return `${(luna / 100000).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 5 })} NIM`;
+}
+
+async function readWalletConsensus(nimiq) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => nimiq.isConsensusEstablished()),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Consensus unavailable")), 10000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readWalletTestnetBalance(address) {
+  const rpc = async (method, params) => {
+    const response = await fetchWithTimeout(WALLET_TESTNET_RPC_URL, {
+      method: "POST", credentials: "omit", referrerPolicy: "no-referrer",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    }, 10000);
+    if (!response.ok) throw new Error("Balance unavailable");
+    const payload = await response.json();
+    if (payload.error) throw new Error("Balance unavailable");
+    return payload.result?.data;
+  };
+  const block = await rpc("getLatestBlock", [false]);
+  if (block?.network !== "TestAlbatross") throw new Error("Balance source is not Testnet");
+  const account = await rpc("getAccountByAddress", [address]);
+  if (!Number.isSafeInteger(account?.balance) || account.balance < 0) throw new Error("Balance unavailable");
+  return account.balance;
+}
+
+async function connectWallet() {
+  if (walletConnecting) return;
+  if (walletAddress) {
+    setWalletPopover(els.walletPopover.classList.contains("hidden"));
+    return;
+  }
+  const session = ++walletSession;
+  walletConnecting = true;
+  walletMessage = "";
+  renderWallet();
+  try {
+    const nimiq = await getNimiqProvider();
+    // Account permission is requested ONLY by this user-initiated Connect handler.
+    const accounts = await nimiq.listAccounts();
+    if (session !== walletSession) return;
+    const accountError = providerError(accounts);
+    if (accountError) throw accountError;
+    const address = Array.isArray(accounts) && accounts.find((account) =>
+      typeof account === "string" && /^NQ\d{2}[0-9A-Z]{32}$/.test(account.replace(/\s+/g, ""))
+    );
+    if (!address) {
+      walletMessage = "No Nimiq account is available. Add an account in Nimiq Pay and try Connect again.";
+      return;
+    }
+    walletAddress = address;
+    renderWallet();
+    setWalletPopover(true);
+    // Separate wallet consensus from the independently verified Testnet balance source.
+    const [consensus, balance] = await Promise.allSettled([
+      readWalletConsensus(nimiq),
+      readWalletTestnetBalance(address),
+    ]);
+    if (session !== walletSession) return;
+    walletConsensus = consensus.status === "fulfilled" && consensus.value === true;
+    walletBalanceLuna = balance.status === "fulfilled" ? balance.value : null;
+    const messages = [];
+    if (!walletConsensus) messages.push("Wallet consensus is not established yet.");
+    if (balance.status !== "fulfilled") messages.push("Balance unavailable. Your wallet remains connected.");
+    walletMessage = messages.join(" ");
+  } catch (error) {
+    if (session !== walletSession) return;
+    walletMessage = walletErrorKind(error) === "cancelled"
+      ? "Account access was declined. Click Connect to try again."
+      : "Open in Nimiq Pay to connect.";
+  } finally {
+    if (session === walletSession) {
+      walletConnecting = false;
+      renderWallet();
+      if (walletMessage) setWalletPopover(true);
+    }
+  }
+}
+
+function disconnectWallet() {
+  walletSession += 1;
+  walletAddress = null;
+  walletBalanceLuna = null;
+  walletConsensus = false;
+  walletConnecting = false;
+  walletMessage = "";
+  renderWallet();
+  setWalletPopover(false);
+  els.walletConnect.focus();
+}
+
+els.walletConnect.addEventListener("click", connectWallet);
+els.walletDisconnect.addEventListener("click", disconnectWallet);
+document.addEventListener("click", (event) => {
+  if (!els.walletSession.contains(event.target)) setWalletPopover(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.walletPopover.classList.contains("hidden")) {
+    setWalletPopover(false);
+    els.walletConnect.focus();
+  }
+});
+
 function initializeNimiq() {
   if (nimiqReady) return Promise.resolve();
   if (nimiqInitTask) return nimiqInitTask;
@@ -349,15 +521,13 @@ function initializeNimiq() {
       syncUploadButtons();
       return;
     }
-    nimiqPromise = init({ timeout: 10000 });
-    await nimiqPromise;
+    await getNimiqProvider();
     nimiqReady = true;
     els.paymentStatus.textContent = currentJobId && pendingPayment && pendingPayment.sourceJobId === sourceJobId
       ? "Payment recovery ready for this analysis."
       : `Nimiq Pay connected · ${paymentConfig.network} required`;
     els.paymentStatus.classList.add("ready");
     } catch (error) {
-      nimiqPromise = null;
       if (!apiReady) {
         return;
       }

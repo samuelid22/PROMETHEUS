@@ -9,6 +9,18 @@ const html = readFileSync(resolve(process.cwd(), "web/index.html"), "utf8");
 const HASH_A = "ab".repeat(32);
 const HASH_B = "cd".repeat(32);
 const RECOVERY_KEY = "prometheus.recovery.v2";
+const WALLET_ADDRESS = "NQ07 0000 0000 0000 0000 0000 0000 0000 0000";
+const WALLET_RPC = "https://rpc.testnet.nimiqwatch.com/";
+
+function walletProvider(overrides = {}) {
+  return {
+    listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS]),
+    isConsensusEstablished: vi.fn().mockResolvedValue(true),
+    sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_A),
+    disconnect: vi.fn(),
+    ...overrides,
+  };
+}
 
 function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
@@ -73,12 +85,22 @@ function advancedResult(id) {
   };
 }
 
-function mockApi({ verifyError = null, inspectError = null, pingResponses = [], healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null } = {}) {
+function mockApi({ verifyError = null, inspectError = null, pingResponses = [], healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null,
+  balanceError = null, balanceLuna = 12542000, rpcNetwork = "TestAlbatross" } = {}) {
   let quoteNumber = 0;
   let inspectNumber = 0;
   const quotes = new Map();
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url);
+    if (path === WALLET_RPC) {
+      const request = JSON.parse(options.body);
+      if (request.method === "getLatestBlock") return response({ result: { data: { network: rpcNetwork } } });
+      if (request.method === "getAccountByAddress") {
+        if (balanceError) throw balanceError;
+        return response({ result: { data: { balance: balanceLuna } } });
+      }
+      throw new Error(`Unexpected RPC method: ${request.method}`);
+    }
     if (path === "/api/health") return response(
       { status: "ok" },
       healthResponses.length ? healthResponses.shift() : 200
@@ -151,6 +173,247 @@ describe("basic inspection and per-job payment", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("starts with Connect and never requests accounts or balances on load, focus, or online", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("online"));
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(true);
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(0);
+  });
+
+  it("connects once on an intentional click and displays Testnet balance, short address, and separate consensus", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    const button = document.getElementById("wallet-connect");
+    button.click();
+    expect(button.textContent).toBe("Connecting…");
+    expect(button.disabled).toBe(true);
+    button.click();
+    await flush();
+    expect(button.textContent).toBe("125.42 NIM · NQ07…0000");
+    expect(button.disabled).toBe(false);
+    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
+    expect(document.getElementById("wallet-balance").textContent).toBe("125.42 NIM");
+    expect(document.querySelector(".wallet-network").textContent).toBe("TESTNET");
+    expect(document.getElementById("wallet-consensus").textContent).toBe("Connected");
+    expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    expect(initMock).toHaveBeenCalledTimes(1);
+    const rpcCalls = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC);
+    expect(rpcCalls.map(([, options]) => JSON.parse(options.body).method)).toEqual(["getLatestBlock", "getAccountByAddress"]);
+    expect(JSON.parse(rpcCalls[1][1].body).params).toEqual([WALLET_ADDRESS]);
+    expect(rpcCalls[1][1].credentials).toBe("omit");
+    expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC).some(([, options]) => String(options?.body).includes(WALLET_ADDRESS))).toBe(false);
+    expect(JSON.stringify(localStorage)).not.toContain(WALLET_ADDRESS);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes" || url === "/api/analyze")).toHaveLength(0);
+    button.click();
+    expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(true);
+    button.click();
+    expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(false);
+    expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 1])("renders an authoritative balance of %s luna without inventing funds", async (balanceLuna) => {
+    initMock.mockResolvedValue(walletProvider());
+    mockApi({ balanceLuna });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-balance").textContent).toBe(balanceLuna === 0 ? "0.00 NIM" : "0.00001 NIM");
+  });
+
+  it.each(["false", "rejected", "timeout"])("keeps the wallet and Testnet balance when consensus is %s", async (state) => {
+    if (state === "timeout") vi.useFakeTimers();
+    const consensus = state === "false" ? vi.fn().mockResolvedValue(false)
+      : state === "rejected" ? vi.fn().mockRejectedValue(new Error("Unavailable")) : vi.fn(() => new Promise(() => {}));
+    initMock.mockResolvedValue(walletProvider({ isConsensusEstablished: consensus }));
+    mockApi();
+    await import("./app.js");
+    if (state === "timeout") await vi.advanceTimersByTimeAsync(0); else await flush();
+    document.getElementById("wallet-connect").click();
+    if (state === "timeout") await vi.advanceTimersByTimeAsync(10000); else await flush();
+    expect(document.getElementById("wallet-consensus").textContent).toBe("Not established");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-connect").textContent).toBe("125.42 NIM · NQ07…0000");
+  });
+
+  it("keeps the wallet connected and the 10 NIM payment flow usable when balance lookup fails", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ balanceError: new TypeError("RPC unavailable") });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Balance unavailable · NQ07…0000");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-consensus").textContent).toBe("Connected");
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledExactlyOnceWith({
+      recipient: "NQ43 TEST", value: 1000000, data: "prometheus:quote-1",
+    });
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(1);
+    expect(initMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a Mainnet balance source without querying the account or disconnecting the wallet", async () => {
+    initMock.mockResolvedValue(walletProvider());
+    const fetchMock = mockApi({ rpcNetwork: "MainAlbatross" });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-balance").textContent).toBe("Balance unavailable");
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(1);
+  });
+
+  it.each([undefined, -1, "12542000", 1.5])("does not invent a balance when the RPC value is invalid: %s", async (balanceLuna) => {
+    initMock.mockResolvedValue(walletProvider());
+    // undefined represents a missing balance, not the mock's default.
+    const fetchMock = mockApi({ balanceLuna: balanceLuna === undefined ? null : balanceLuna });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-balance").textContent).toBe("Balance unavailable");
+    expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
+  });
+
+  it("shows useful guidance outside Nimiq Pay without a fake connected state", async () => {
+    initMock.mockRejectedValue(new Error("Nimiq provider not found"));
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-message").textContent).toBe("Open in Nimiq Pay to connect.");
+    expect(document.getElementById("wallet-details").classList.contains("hidden")).toBe(true);
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(0);
+  });
+
+  it("handles rejected account access without balance reads or transactions", async () => {
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue({ error: { type: "PermissionDeniedError", message: "Denied" } }) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-message").textContent).toContain("Account access was declined");
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(0);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("handles no available account", async () => {
+    initMock.mockResolvedValue(walletProvider({ listAccounts: vi.fn().mockResolvedValue([]) }));
+    mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-message").textContent).toContain("No Nimiq account is available");
+  });
+
+  it("shares in-progress SDK initialization between Connect and payment readiness", async () => {
+    let finishInit;
+    initMock.mockImplementation(() => new Promise((resolve) => { finishInit = resolve; }));
+    const provider = walletProvider();
+    mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(initMock).toHaveBeenCalledTimes(1);
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    finishInit(provider);
+    await flush();
+    expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("wallet-connect").textContent).toBe("125.42 NIM · NQ07…0000");
+  });
+
+  it("locally disconnects, clears the address, and leaves existing payment recovery usable", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    mockApi({ verifyError: new TypeError("Verification unavailable") });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    const savedPayment = JSON.parse(localStorage.getItem(RECOVERY_KEY)).payment;
+    expect(savedPayment.txHash).toBe(HASH_A);
+    document.getElementById("wallet-connect").click();
+    document.getElementById("wallet-disconnect").click();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-address").textContent).toBe("");
+    expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(true);
+    expect(provider.disconnect).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)).payment).toEqual(savedPayment);
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore the address when a balance read completes after local disconnect", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const baseFetch = mockApi();
+    let finishBalance;
+    globalThis.fetch = vi.fn((url, options) => {
+      if (url === WALLET_RPC && JSON.parse(options.body).method === "getAccountByAddress") {
+        return new Promise((resolve) => { finishBalance = resolve; });
+      }
+      return baseFetch(url, options);
+    });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("wallet-disconnect").click();
+    finishBalance(response({ result: { data: { balance: 12542000 } } }));
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-address").textContent).toBe("");
+  });
+
+  it("closes the wallet popover with Escape and an outside click", async () => {
+    initMock.mockResolvedValue(walletProvider());
+    mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(document.getElementById("wallet-connect").getAttribute("aria-expanded")).toBe("false");
+    document.getElementById("wallet-connect").click();
+    document.body.click();
+    expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(true);
   });
 
   it("opens the file chooser and starts basic analysis on the first click only", async () => {

@@ -15,7 +15,21 @@
   </a>
   <div class="topbar-meta">
     <span class="tagline">Creative video intelligence</span>
-    <span class="mini-app-badge" title="Nimiq Pay Mini App"><span aria-hidden="true">✦</span> Nimiq Pay</span>
+    <div id="wallet-session" class="wallet-session">
+      <button id="wallet-connect" class="mini-app-badge wallet-control" type="button" aria-controls="wallet-popover" aria-expanded="false">Connect</button>
+      <section id="wallet-popover" class="wallet-popover hidden" aria-labelledby="wallet-heading">
+        <h2 id="wallet-heading">Wallet connection</h2>
+        <dl id="wallet-details" class="wallet-details hidden">
+          <dt>Nimiq address</dt><dd id="wallet-address" class="wallet-address"></dd>
+          <dt>Testnet balance</dt><dd id="wallet-balance">Balance unavailable</dd>
+          <dt>Network balance source</dt><dd class="wallet-network">TESTNET</dd>
+          <dt>Wallet consensus</dt><dd id="wallet-consensus">Not established</dd>
+        </dl>
+        <p id="wallet-message" class="wallet-message" role="status" aria-live="polite"></p>
+        <button id="wallet-disconnect" class="secondary hidden" type="button">Disconnect</button>
+        <p id="wallet-disconnect-note" class="wallet-note hidden">Disconnect clears your wallet display in Prometheus only.</p>
+      </section>
+    </div>
   </div>
 </header>
 
