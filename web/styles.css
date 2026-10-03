@@ -65,7 +65,7 @@ button, [role="button"] { touch-action: manipulation; }
 .brand-mark circle, .process-mark circle { fill: var(--gold); }
 .brand-asset { display: block; max-width: 180px; max-height: 32px; object-fit: contain; }
 .brand-wordmark { font-size: 18px; font-weight: 760; letter-spacing: -0.04em; }
-.topbar-meta { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.topbar-meta { display: flex; align-items: center; justify-content: flex-end; gap: 13px; min-width: 0; }
 .tagline { color: var(--muted); font-size: 13px; }
 .mini-app-badge { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid rgba(114, 216, 245, 0.24); border-radius: 999px; color: #c6f1fd; background: rgba(30, 122, 151, 0.12); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
 .mini-app-badge span { color: var(--cyan); }
@@ -74,7 +74,7 @@ button, [role="button"] { touch-action: manipulation; }
 .wallet-control:disabled { cursor: wait; }
 .wallet-control .wallet-label-balance { overflow: hidden; text-overflow: ellipsis; }
 .wallet-control .wallet-label-address { flex: none; }
-.wallet-popover { position: absolute; top: calc(100% + 12px); right: 0; width: min(310px, calc(100vw - 32px)); max-height: 75vh; overflow: auto; padding: 17px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-raised); box-shadow: var(--shadow); }
+.wallet-popover { position: absolute; top: calc(100% + 12px); right: 0; width: min(310px, calc(100vw - 48px)); max-height: 75vh; overflow: auto; padding: 17px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface-raised); box-shadow: var(--shadow); }
 .wallet-popover h2 { margin: 0; font-size: 15px; }
 .wallet-details { margin: 14px 0; font-size: 12px; line-height: 1.5; }
 .wallet-details dt { margin-top: 10px; color: var(--muted); }
