@@ -65,13 +65,10 @@ const els = {
   walletDetails: document.getElementById("wallet-details"),
   walletAddress: document.getElementById("wallet-address"),
   walletBalance: document.getElementById("wallet-balance"),
+  walletAccountCountLabel: document.getElementById("wallet-account-count-label"),
+  walletAccountCount: document.getElementById("wallet-account-count"),
   walletConsensus: document.getElementById("wallet-consensus"),
   walletMessage: document.getElementById("wallet-message"),
-  walletDiagnosticToggle: document.getElementById("wallet-diagnostic-toggle"),
-  walletDiagnostic: document.getElementById("wallet-diagnostic"),
-  walletDiagnosticCount: document.getElementById("wallet-diagnostic-count"),
-  walletDiagnosticList: document.getElementById("wallet-diagnostic-list"),
-  walletDiagnosticSum: document.getElementById("wallet-diagnostic-sum"),
   walletDisconnect: document.getElementById("wallet-disconnect"),
   walletDisconnectNote: document.getElementById("wallet-disconnect-note"),
   dropzone: document.getElementById("dropzone"),
@@ -139,12 +136,12 @@ let nimiqInitTask = null;
 // Wallet display is memory-only and never enters payment recovery or backend requests.
 let walletAddress = null;
 let walletBalanceLuna = null;
+let walletBalanceState = "unavailable";
+let walletAccountCount = 0;
 let walletConsensus = false;
 let walletConnecting = false;
 let walletSession = 0;
 let walletMessage = "";
-let walletAccounts = [];
-let walletDiagnosticLoaded = false;
 let apiReady = false;
 let apiReadyTask = null;
 let pendingPayment = recovery.payment || null;
@@ -381,7 +378,7 @@ function renderWallet() {
     const compact = walletAddress.replace(/\s+/g, "");
     const balance = document.createElement("span");
     balance.className = "wallet-label-balance";
-    balance.textContent = walletBalanceLuna === null ? "Balance unavailable" : formatWalletBalance(walletBalanceLuna);
+    balance.textContent = walletBalanceText();
     const address = document.createElement("span");
     address.className = "wallet-label-address";
     address.textContent = `${compact.slice(0, 4)}…${compact.slice(-4)}`;
@@ -390,16 +387,23 @@ function renderWallet() {
   els.walletHeading.textContent = walletAddress ? "Connected wallet" : "Wallet connection";
   els.walletDetails.classList.toggle("hidden", !walletAddress);
   els.walletAddress.textContent = walletAddress || "";
-  els.walletBalance.textContent = walletBalanceLuna === null ? "Balance unavailable" : formatWalletBalance(walletBalanceLuna);
+  els.walletBalance.textContent = walletBalanceText();
+  els.walletAccountCountLabel.classList.toggle("hidden", walletAccountCount <= 1);
+  els.walletAccountCount.classList.toggle("hidden", walletAccountCount <= 1);
+  els.walletAccountCount.textContent = walletAccountCount > 1 ? String(walletAccountCount) : "";
   els.walletConsensus.textContent = walletConsensus ? "Connected" : "Not established";
   els.walletMessage.textContent = walletMessage;
-  els.walletDiagnosticToggle.classList.toggle("hidden", !walletAddress);
   els.walletDisconnect.classList.toggle("hidden", !walletAddress);
   els.walletDisconnectNote.classList.toggle("hidden", !walletAddress);
 }
 
 function formatWalletBalance(luna) {
   return `${(luna / 100000).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 5 })} NIM`;
+}
+
+function walletBalanceText() {
+  if (walletBalanceState === "ready") return formatWalletBalance(walletBalanceLuna);
+  return walletBalanceState === "partial" ? "Partial balance unavailable" : "Balance unavailable";
 }
 
 async function readWalletConsensus(nimiq) {
@@ -433,67 +437,35 @@ async function readWalletTestnetBalance(address) {
   return account.balance;
 }
 
-function resetWalletDiagnostic() {
-  walletDiagnosticLoaded = false;
-  els.walletDiagnostic.classList.add("hidden");
-  els.walletDiagnosticToggle.setAttribute("aria-expanded", "false");
-  els.walletDiagnosticCount.textContent = "";
-  els.walletDiagnosticList.replaceChildren();
-  els.walletDiagnosticSum.textContent = "";
-}
-
-async function openWalletDiagnostic() {
-  if (!walletAddress) return;
-  const opening = els.walletDiagnostic.classList.contains("hidden");
-  els.walletDiagnostic.classList.toggle("hidden", !opening);
-  els.walletDiagnosticToggle.setAttribute("aria-expanded", String(opening));
-  if (!opening || walletDiagnosticLoaded) return;
-  walletDiagnosticLoaded = true;
-  const session = walletSession;
-  const selected = walletAddress.replace(/\s+/g, "").toUpperCase();
-  const accounts = walletAccounts.slice();
-  els.walletDiagnosticCount.textContent = `Addresses returned by listAccounts(): ${accounts.length}`;
-  els.walletDiagnosticSum.textContent = "Reading Testnet on-chain balances…";
-  const balances = new Map();
-  let totalLuna = 0;
-  let complete = true;
+async function readApprovedTestnetBalance(accounts) {
+  const unique = new Map();
+  let invalid = false;
   for (const account of accounts) {
-    if (session !== walletSession) return;
     const compact = typeof account === "string" ? account.replace(/\s+/g, "").toUpperCase() : "";
-    const valid = /^NQ\d{2}[0-9A-Z]{32}$/.test(compact);
-    const item = document.createElement("li");
-    const label = document.createElement("span");
-    label.textContent = valid ? `${compact.slice(0, 4)}…${compact.slice(-4)}${compact === selected ? " · Selected by Prometheus" : ""}` : "Invalid address returned by provider";
-    if (compact === selected) label.className = "wallet-diagnostic-selected";
-    const balanceLabel = document.createElement("span");
-    balanceLabel.className = "wallet-diagnostic-balance";
-    balanceLabel.textContent = "Testnet on-chain balance: Reading…";
-    item.append(label, balanceLabel);
-    els.walletDiagnosticList.append(item);
-    if (!valid) {
-      complete = false;
-      balanceLabel.textContent = "Testnet on-chain balance: Unavailable";
+    if (!/^NQ\d{2}[0-9A-Z]{32}$/.test(compact)) {
+      invalid = true;
       continue;
     }
-    if (!balances.has(compact)) {
-      try {
-        // This read is triggered only by the diagnostic button, for provider-returned addresses.
-        balances.set(compact, await readWalletTestnetBalance(account));
-        totalLuna += balances.get(compact);
-        if (!Number.isSafeInteger(totalLuna)) complete = false;
-      } catch (_) {
-        balances.set(compact, null);
-        complete = false;
-      }
-    }
-    if (session !== walletSession) return;
-    const luna = balances.get(compact);
-    balanceLabel.textContent = `Testnet on-chain balance: ${luna === null ? "Unavailable" : formatWalletBalance(luna)}`;
+    if (!unique.has(compact)) unique.set(compact, account);
   }
-  if (session !== walletSession) return;
-  els.walletDiagnosticSum.textContent = complete
-    ? `Sum of returned addresses' Testnet on-chain balances: ${formatWalletBalance(totalLuna)}`
-    : "Sum of returned addresses' Testnet on-chain balances: Unavailable (one or more balances could not be read).";
+  const balances = await Promise.allSettled([...unique.values()].map(readWalletTestnetBalance));
+  let totalLuna = 0;
+  let succeeded = 0;
+  let failed = invalid;
+  for (const balance of balances) {
+    if (balance.status !== "fulfilled") {
+      failed = true;
+      continue;
+    }
+    totalLuna += balance.value;
+    succeeded += 1;
+    if (!Number.isSafeInteger(totalLuna)) failed = true;
+  }
+  return {
+    accountCount: unique.size,
+    luna: !failed ? totalLuna : null,
+    state: !failed ? "ready" : succeeded > 0 ? "partial" : "unavailable",
+  };
 }
 
 async function connectWallet() {
@@ -521,21 +493,21 @@ async function connectWallet() {
       return;
     }
     walletAddress = address;
-    walletAccounts = accounts.slice();
-    resetWalletDiagnostic();
     renderWallet();
     setWalletPopover(true);
     // Separate wallet consensus from the independently verified Testnet balance source.
     const [consensus, balance] = await Promise.allSettled([
       readWalletConsensus(nimiq),
-      readWalletTestnetBalance(address),
+      readApprovedTestnetBalance(accounts),
     ]);
     if (session !== walletSession) return;
     walletConsensus = consensus.status === "fulfilled" && consensus.value === true;
-    walletBalanceLuna = balance.status === "fulfilled" ? balance.value : null;
+    walletAccountCount = balance.status === "fulfilled" ? balance.value.accountCount : 0;
+    walletBalanceLuna = balance.status === "fulfilled" ? balance.value.luna : null;
+    walletBalanceState = balance.status === "fulfilled" ? balance.value.state : "unavailable";
     const messages = [];
     if (!walletConsensus) messages.push("Wallet consensus is not established yet.");
-    if (balance.status !== "fulfilled") messages.push("Balance unavailable. Your wallet remains connected.");
+    if (walletBalanceState !== "ready") messages.push(`${walletBalanceText()}. Your wallet remains connected.`);
     walletMessage = messages.join(" ");
   } catch (error) {
     if (session !== walletSession) return;
@@ -555,18 +527,17 @@ function disconnectWallet() {
   walletSession += 1;
   walletAddress = null;
   walletBalanceLuna = null;
+  walletBalanceState = "unavailable";
+  walletAccountCount = 0;
   walletConsensus = false;
   walletConnecting = false;
   walletMessage = "";
-  walletAccounts = [];
-  resetWalletDiagnostic();
   renderWallet();
   setWalletPopover(false);
   els.walletConnect.focus();
 }
 
 els.walletConnect.addEventListener("click", connectWallet);
-els.walletDiagnosticToggle.addEventListener("click", openWalletDiagnostic);
 els.walletDisconnect.addEventListener("click", disconnectWallet);
 document.addEventListener("click", (event) => {
   if (!els.walletSession.contains(event.target)) setWalletPopover(false);

@@ -20,20 +20,13 @@
       <section id="wallet-popover" class="wallet-popover hidden" aria-labelledby="wallet-heading">
         <h2 id="wallet-heading">Wallet connection</h2>
         <dl id="wallet-details" class="wallet-details hidden">
-          <dt>Nimiq address</dt><dd id="wallet-address" class="wallet-address"></dd>
-          <dt>Testnet balance</dt><dd id="wallet-balance">Balance unavailable</dd>
+          <dt>Selected wallet address</dt><dd id="wallet-address" class="wallet-address"></dd>
+          <dt>Testnet on-chain balance</dt><dd id="wallet-balance">Balance unavailable</dd>
+          <dt id="wallet-account-count-label" class="hidden">Approved addresses</dt><dd id="wallet-account-count" class="hidden"></dd>
           <dt>Network balance source</dt><dd class="wallet-network">TESTNET</dd>
           <dt>Wallet consensus</dt><dd id="wallet-consensus">Not established</dd>
         </dl>
         <p id="wallet-message" class="wallet-message" role="status" aria-live="polite"></p>
-        <button id="wallet-diagnostic-toggle" class="wallet-diagnostic-toggle hidden" type="button" aria-controls="wallet-diagnostic" aria-expanded="false">Inspect TESTNET addresses</button>
-        <section id="wallet-diagnostic" class="wallet-diagnostic hidden" aria-labelledby="wallet-diagnostic-heading">
-          <h3 id="wallet-diagnostic-heading">TESTNET account diagnostic</h3>
-          <p id="wallet-diagnostic-count"></p>
-          <ol id="wallet-diagnostic-list" class="wallet-diagnostic-list"></ol>
-          <p id="wallet-diagnostic-sum" role="status" aria-live="polite"></p>
-          <p class="wallet-note">If Nimiq Pay shows “Processing funds…”: Pending wallet funds may not yet appear in confirmed on-chain balance.</p>
-        </section>
         <button id="wallet-disconnect" class="secondary hidden" type="button">Disconnect</button>
         <p id="wallet-disconnect-note" class="wallet-note hidden">Disconnect clears your wallet display in Prometheus only.</p>
       </section>

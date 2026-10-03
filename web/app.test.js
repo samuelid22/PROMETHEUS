@@ -210,6 +210,7 @@ describe("basic inspection and per-job payment", () => {
     expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
     expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
     expect(document.getElementById("wallet-balance").textContent).toBe("125.42 NIM");
+    expect(document.getElementById("wallet-account-count").classList.contains("hidden")).toBe(true);
     expect(document.querySelector(".wallet-network").textContent).toBe("TESTNET");
     expect(document.getElementById("wallet-consensus").textContent).toBe("Connected");
     expect(provider.listAccounts).toHaveBeenCalledTimes(1);
@@ -229,24 +230,7 @@ describe("basic inspection and per-job payment", () => {
     expect(provider.listAccounts).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the TEST diagnostic closed and makes no additional balance requests until explicitly opened", async () => {
-    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
-    initMock.mockResolvedValue(provider);
-    const fetchMock = mockApi();
-    await import("./app.js");
-    await flush();
-    expect(document.getElementById("wallet-diagnostic-toggle").classList.contains("hidden")).toBe(true);
-    document.getElementById("wallet-connect").click();
-    await flush();
-    expect(document.getElementById("wallet-diagnostic").classList.contains("hidden")).toBe(true);
-    expect(document.getElementById("wallet-diagnostic-list").children).toHaveLength(0);
-    const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
-      .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
-    expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS]);
-    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
-  });
-
-  it("shows only returned Testnet addresses, selected account, individual balances and their sum on open", async () => {
+  it("shows the sum across approved addresses while preserving the first selected address and payment source choice", async () => {
     const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
     initMock.mockResolvedValue(provider);
     const fetchMock = mockApi({ balancesByAddress: { [WALLET_ADDRESS]: 0, [SECOND_WALLET_ADDRESS]: 11005000000 } });
@@ -254,70 +238,74 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    const toggle = document.getElementById("wallet-diagnostic-toggle");
-    toggle.click();
-    await flush();
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(document.getElementById("wallet-diagnostic-count").textContent).toContain("2");
-    const rows = [...document.querySelectorAll("#wallet-diagnostic-list li")].map((item) => item.textContent);
-    expect(rows).toEqual([
-      "NQ07…0000 · Selected by PrometheusTestnet on-chain balance: 0.00 NIM",
-      "NQ08…1111Testnet on-chain balance: 110,050.00 NIM",
-    ]);
-    expect(document.getElementById("wallet-diagnostic-sum").textContent).toContain("110,050.00 NIM");
-    expect(document.getElementById("wallet-diagnostic").textContent).toContain("Pending wallet funds may not yet appear in confirmed on-chain balance.");
+    expect(document.getElementById("wallet-connect").textContent).toBe("110,050.00 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
+    expect(document.getElementById("wallet-balance").textContent).toBe("110,050.00 NIM");
+    expect(document.getElementById("wallet-account-count").textContent).toBe("2");
+    expect(document.getElementById("wallet-account-count").classList.contains("hidden")).toBe(false);
+    expect(document.getElementById("wallet-account-count-label").textContent).toBe("Approved addresses");
+    expect(document.getElementById("wallet-details").textContent).toContain("Testnet on-chain balance");
+    expect(document.querySelector(".wallet-network").textContent).toBe("TESTNET");
+    expect(document.getElementById("wallet-diagnostic-toggle")).toBeNull();
     const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
       .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
-    expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS, WALLET_ADDRESS, SECOND_WALLET_ADDRESS]);
+    expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]);
     expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC).some(([, options]) =>
       String(options?.body).includes(SECOND_WALLET_ADDRESS))).toBe(false);
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
-    const rpcCount = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).length;
-    toggle.click();
-    toggle.click();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
     await flush();
-    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(rpcCount);
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledExactlyOnceWith({
+      recipient: "NQ43 TEST", value: 1000000, data: "prometheus:quote-1",
+    });
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(1);
   });
 
-  it("does not present a partial sum as a true total when one returned address cannot be read", async () => {
+  it("shows a partial-balance warning rather than the selected address's balance when another lookup fails", async () => {
     initMock.mockResolvedValue(walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) }));
     mockApi({ balancesByAddress: { [WALLET_ADDRESS]: 12542000, [SECOND_WALLET_ADDRESS]: new Error("RPC unavailable") } });
     await import("./app.js");
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    document.getElementById("wallet-diagnostic-toggle").click();
-    await flush();
-    expect(document.getElementById("wallet-diagnostic-list").textContent).toContain("Testnet on-chain balance: Unavailable");
-    expect(document.getElementById("wallet-diagnostic-sum").textContent).toContain("Unavailable");
-    expect(document.getElementById("wallet-diagnostic-sum").textContent).not.toContain("125.42 NIM");
+    expect(document.getElementById("wallet-connect").textContent).toBe("Partial balance unavailable · NQ07…0000");
+    expect(document.getElementById("wallet-balance").textContent).toBe("Partial balance unavailable");
+    expect(document.getElementById("wallet-account-count").textContent).toBe("2");
+    expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
     expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
   });
 
-  it("clears diagnostic data on local disconnect and ignores a late RPC response", async () => {
-    initMock.mockResolvedValue(walletProvider());
-    const baseFetch = mockApi();
-    let accountReads = 0;
-    let finishDiagnostic;
-    globalThis.fetch = vi.fn((url, options) => {
-      if (url === WALLET_RPC && JSON.parse(options.body).method === "getAccountByAddress" && ++accountReads === 2) {
-        return new Promise((resolve) => { finishDiagnostic = resolve; });
-      }
-      return baseFetch(url, options);
-    });
+  it("counts and queries a duplicated approved address only once", async () => {
+    initMock.mockResolvedValue(walletProvider({ listAccounts: vi.fn().mockResolvedValue([
+      WALLET_ADDRESS, WALLET_ADDRESS, SECOND_WALLET_ADDRESS,
+    ]) }));
+    const fetchMock = mockApi({ balancesByAddress: { [WALLET_ADDRESS]: 100000, [SECOND_WALLET_ADDRESS]: 200000 } });
     await import("./app.js");
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    document.getElementById("wallet-diagnostic-toggle").click();
+    expect(document.getElementById("wallet-connect").textContent).toBe("3.00 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-account-count").textContent).toBe("2");
+    const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
+      .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
+    expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]);
+  });
+
+  it("keeps the wallet connected with balance unavailable when every approved address lookup fails", async () => {
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    mockApi({ balanceError: new TypeError("RPC unavailable") });
+    await import("./app.js");
     await flush();
-    document.getElementById("wallet-disconnect").click();
-    finishDiagnostic(response({ result: { data: { balance: 12542000 } } }));
+    document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-diagnostic-toggle").classList.contains("hidden")).toBe(true);
-    expect(document.getElementById("wallet-diagnostic").classList.contains("hidden")).toBe(true);
-    expect(document.getElementById("wallet-diagnostic-list").textContent).toBe("");
-    expect(document.getElementById("wallet-diagnostic-sum").textContent).toBe("");
+    expect(document.getElementById("wallet-connect").textContent).toBe("Balance unavailable · NQ07…0000");
+    expect(document.getElementById("wallet-balance").textContent).toBe("Balance unavailable");
+    expect(document.getElementById("wallet-account-count").textContent).toBe("2");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
   });
 
   it.each([0, 1])("renders an authoritative balance of %s luna without inventing funds", async (balanceLuna) => {
