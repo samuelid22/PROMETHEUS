@@ -84,6 +84,15 @@ button, [role="button"] { touch-action: manipulation; }
 .wallet-message, .wallet-note { margin: 12px 0 0; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
 .wallet-message:empty { display: none; }
 .wallet-note { color: var(--muted); font-size: 11px; }
+.wallet-diagnostic-toggle { display: block; margin-top: 12px; padding: 0; border: 0; color: var(--cyan); background: none; font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; }
+.wallet-diagnostic { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.5; }
+.wallet-diagnostic h3 { margin: 0 0 6px; font-size: 13px; }
+.wallet-diagnostic p { margin: 6px 0; }
+.wallet-diagnostic-list { margin: 10px 0; padding-left: 20px; }
+.wallet-diagnostic-list li { margin: 8px 0; overflow-wrap: anywhere; }
+.wallet-diagnostic-list span { display: block; }
+.wallet-diagnostic-list .wallet-diagnostic-balance { color: var(--text-soft); }
+.wallet-diagnostic-selected { color: var(--cyan); }
 .wallet-popover .secondary { margin-top: 14px; min-height: 42px; }
 
 .container { width: min(100%, 810px); margin: 0 auto; padding: 0 clamp(16px, 4vw, 28px) 70px; }

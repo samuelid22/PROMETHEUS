@@ -67,6 +67,11 @@ const els = {
   walletBalance: document.getElementById("wallet-balance"),
   walletConsensus: document.getElementById("wallet-consensus"),
   walletMessage: document.getElementById("wallet-message"),
+  walletDiagnosticToggle: document.getElementById("wallet-diagnostic-toggle"),
+  walletDiagnostic: document.getElementById("wallet-diagnostic"),
+  walletDiagnosticCount: document.getElementById("wallet-diagnostic-count"),
+  walletDiagnosticList: document.getElementById("wallet-diagnostic-list"),
+  walletDiagnosticSum: document.getElementById("wallet-diagnostic-sum"),
   walletDisconnect: document.getElementById("wallet-disconnect"),
   walletDisconnectNote: document.getElementById("wallet-disconnect-note"),
   dropzone: document.getElementById("dropzone"),
@@ -138,6 +143,8 @@ let walletConsensus = false;
 let walletConnecting = false;
 let walletSession = 0;
 let walletMessage = "";
+let walletAccounts = [];
+let walletDiagnosticLoaded = false;
 let apiReady = false;
 let apiReadyTask = null;
 let pendingPayment = recovery.payment || null;
@@ -386,6 +393,7 @@ function renderWallet() {
   els.walletBalance.textContent = walletBalanceLuna === null ? "Balance unavailable" : formatWalletBalance(walletBalanceLuna);
   els.walletConsensus.textContent = walletConsensus ? "Connected" : "Not established";
   els.walletMessage.textContent = walletMessage;
+  els.walletDiagnosticToggle.classList.toggle("hidden", !walletAddress);
   els.walletDisconnect.classList.toggle("hidden", !walletAddress);
   els.walletDisconnectNote.classList.toggle("hidden", !walletAddress);
 }
@@ -425,6 +433,69 @@ async function readWalletTestnetBalance(address) {
   return account.balance;
 }
 
+function resetWalletDiagnostic() {
+  walletDiagnosticLoaded = false;
+  els.walletDiagnostic.classList.add("hidden");
+  els.walletDiagnosticToggle.setAttribute("aria-expanded", "false");
+  els.walletDiagnosticCount.textContent = "";
+  els.walletDiagnosticList.replaceChildren();
+  els.walletDiagnosticSum.textContent = "";
+}
+
+async function openWalletDiagnostic() {
+  if (!walletAddress) return;
+  const opening = els.walletDiagnostic.classList.contains("hidden");
+  els.walletDiagnostic.classList.toggle("hidden", !opening);
+  els.walletDiagnosticToggle.setAttribute("aria-expanded", String(opening));
+  if (!opening || walletDiagnosticLoaded) return;
+  walletDiagnosticLoaded = true;
+  const session = walletSession;
+  const selected = walletAddress.replace(/\s+/g, "").toUpperCase();
+  const accounts = walletAccounts.slice();
+  els.walletDiagnosticCount.textContent = `Addresses returned by listAccounts(): ${accounts.length}`;
+  els.walletDiagnosticSum.textContent = "Reading Testnet on-chain balances…";
+  const balances = new Map();
+  let totalLuna = 0;
+  let complete = true;
+  for (const account of accounts) {
+    if (session !== walletSession) return;
+    const compact = typeof account === "string" ? account.replace(/\s+/g, "").toUpperCase() : "";
+    const valid = /^NQ\d{2}[0-9A-Z]{32}$/.test(compact);
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = valid ? `${compact.slice(0, 4)}…${compact.slice(-4)}${compact === selected ? " · Selected by Prometheus" : ""}` : "Invalid address returned by provider";
+    if (compact === selected) label.className = "wallet-diagnostic-selected";
+    const balanceLabel = document.createElement("span");
+    balanceLabel.className = "wallet-diagnostic-balance";
+    balanceLabel.textContent = "Testnet on-chain balance: Reading…";
+    item.append(label, balanceLabel);
+    els.walletDiagnosticList.append(item);
+    if (!valid) {
+      complete = false;
+      balanceLabel.textContent = "Testnet on-chain balance: Unavailable";
+      continue;
+    }
+    if (!balances.has(compact)) {
+      try {
+        // This read is triggered only by the diagnostic button, for provider-returned addresses.
+        balances.set(compact, await readWalletTestnetBalance(account));
+        totalLuna += balances.get(compact);
+        if (!Number.isSafeInteger(totalLuna)) complete = false;
+      } catch (_) {
+        balances.set(compact, null);
+        complete = false;
+      }
+    }
+    if (session !== walletSession) return;
+    const luna = balances.get(compact);
+    balanceLabel.textContent = `Testnet on-chain balance: ${luna === null ? "Unavailable" : formatWalletBalance(luna)}`;
+  }
+  if (session !== walletSession) return;
+  els.walletDiagnosticSum.textContent = complete
+    ? `Sum of returned addresses' Testnet on-chain balances: ${formatWalletBalance(totalLuna)}`
+    : "Sum of returned addresses' Testnet on-chain balances: Unavailable (one or more balances could not be read).";
+}
+
 async function connectWallet() {
   if (walletConnecting) return;
   if (walletAddress) {
@@ -450,6 +521,8 @@ async function connectWallet() {
       return;
     }
     walletAddress = address;
+    walletAccounts = accounts.slice();
+    resetWalletDiagnostic();
     renderWallet();
     setWalletPopover(true);
     // Separate wallet consensus from the independently verified Testnet balance source.
@@ -485,12 +558,15 @@ function disconnectWallet() {
   walletConsensus = false;
   walletConnecting = false;
   walletMessage = "";
+  walletAccounts = [];
+  resetWalletDiagnostic();
   renderWallet();
   setWalletPopover(false);
   els.walletConnect.focus();
 }
 
 els.walletConnect.addEventListener("click", connectWallet);
+els.walletDiagnosticToggle.addEventListener("click", openWalletDiagnostic);
 els.walletDisconnect.addEventListener("click", disconnectWallet);
 document.addEventListener("click", (event) => {
   if (!els.walletSession.contains(event.target)) setWalletPopover(false);

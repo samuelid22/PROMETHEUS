@@ -10,6 +10,7 @@ const HASH_A = "ab".repeat(32);
 const HASH_B = "cd".repeat(32);
 const RECOVERY_KEY = "prometheus.recovery.v2";
 const WALLET_ADDRESS = "NQ07 0000 0000 0000 0000 0000 0000 0000 0000";
+const SECOND_WALLET_ADDRESS = "NQ08 1111 1111 1111 1111 1111 1111 1111 1111";
 const WALLET_RPC = "https://rpc.testnet.nimiqwatch.com/";
 
 function walletProvider(overrides = {}) {
@@ -86,7 +87,7 @@ function advancedResult(id) {
 }
 
 function mockApi({ verifyError = null, inspectError = null, pingResponses = [], healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null,
-  balanceError = null, balanceLuna = 12542000, rpcNetwork = "TestAlbatross" } = {}) {
+  balanceError = null, balanceLuna = 12542000, balancesByAddress = null, rpcNetwork = "TestAlbatross" } = {}) {
   let quoteNumber = 0;
   let inspectNumber = 0;
   const quotes = new Map();
@@ -97,7 +98,9 @@ function mockApi({ verifyError = null, inspectError = null, pingResponses = [], 
       if (request.method === "getLatestBlock") return response({ result: { data: { network: rpcNetwork } } });
       if (request.method === "getAccountByAddress") {
         if (balanceError) throw balanceError;
-        return response({ result: { data: { balance: balanceLuna } } });
+        const balance = balancesByAddress?.[request.params[0]] ?? balanceLuna;
+        if (balance instanceof Error) throw balance;
+        return response({ result: { data: { balance } } });
       }
       throw new Error(`Unexpected RPC method: ${request.method}`);
     }
@@ -224,6 +227,97 @@ describe("basic inspection and per-job payment", () => {
     button.click();
     expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(false);
     expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the TEST diagnostic closed and makes no additional balance requests until explicitly opened", async () => {
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    expect(document.getElementById("wallet-diagnostic-toggle").classList.contains("hidden")).toBe(true);
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-diagnostic").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("wallet-diagnostic-list").children).toHaveLength(0);
+    const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
+      .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
+    expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS]);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("shows only returned Testnet addresses, selected account, individual balances and their sum on open", async () => {
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ balancesByAddress: { [WALLET_ADDRESS]: 0, [SECOND_WALLET_ADDRESS]: 11005000000 } });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    const toggle = document.getElementById("wallet-diagnostic-toggle");
+    toggle.click();
+    await flush();
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.getElementById("wallet-diagnostic-count").textContent).toContain("2");
+    const rows = [...document.querySelectorAll("#wallet-diagnostic-list li")].map((item) => item.textContent);
+    expect(rows).toEqual([
+      "NQ07…0000 · Selected by PrometheusTestnet on-chain balance: 0.00 NIM",
+      "NQ08…1111Testnet on-chain balance: 110,050.00 NIM",
+    ]);
+    expect(document.getElementById("wallet-diagnostic-sum").textContent).toContain("110,050.00 NIM");
+    expect(document.getElementById("wallet-diagnostic").textContent).toContain("Pending wallet funds may not yet appear in confirmed on-chain balance.");
+    const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
+      .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
+    expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS, WALLET_ADDRESS, SECOND_WALLET_ADDRESS]);
+    expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC).some(([, options]) =>
+      String(options?.body).includes(SECOND_WALLET_ADDRESS))).toBe(false);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    const rpcCount = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).length;
+    toggle.click();
+    toggle.click();
+    await flush();
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(rpcCount);
+  });
+
+  it("does not present a partial sum as a true total when one returned address cannot be read", async () => {
+    initMock.mockResolvedValue(walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) }));
+    mockApi({ balancesByAddress: { [WALLET_ADDRESS]: 12542000, [SECOND_WALLET_ADDRESS]: new Error("RPC unavailable") } });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("wallet-diagnostic-toggle").click();
+    await flush();
+    expect(document.getElementById("wallet-diagnostic-list").textContent).toContain("Testnet on-chain balance: Unavailable");
+    expect(document.getElementById("wallet-diagnostic-sum").textContent).toContain("Unavailable");
+    expect(document.getElementById("wallet-diagnostic-sum").textContent).not.toContain("125.42 NIM");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+  });
+
+  it("clears diagnostic data on local disconnect and ignores a late RPC response", async () => {
+    initMock.mockResolvedValue(walletProvider());
+    const baseFetch = mockApi();
+    let accountReads = 0;
+    let finishDiagnostic;
+    globalThis.fetch = vi.fn((url, options) => {
+      if (url === WALLET_RPC && JSON.parse(options.body).method === "getAccountByAddress" && ++accountReads === 2) {
+        return new Promise((resolve) => { finishDiagnostic = resolve; });
+      }
+      return baseFetch(url, options);
+    });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("wallet-diagnostic-toggle").click();
+    await flush();
+    document.getElementById("wallet-disconnect").click();
+    finishDiagnostic(response({ result: { data: { balance: 12542000 } } }));
+    await flush();
+    expect(document.getElementById("wallet-diagnostic-toggle").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("wallet-diagnostic").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("wallet-diagnostic-list").textContent).toBe("");
+    expect(document.getElementById("wallet-diagnostic-sum").textContent).toBe("");
   });
 
   it.each([0, 1])("renders an authoritative balance of %s luna without inventing funds", async (balanceLuna) => {
