@@ -12,6 +12,13 @@ const RECOVERY_KEY = "prometheus.recovery.v2";
 const WALLET_ADDRESS = "NQ07 0000 0000 0000 0000 0000 0000 0000 0000";
 const SECOND_WALLET_ADDRESS = "NQ08 1111 1111 1111 1111 1111 1111 1111 1111";
 const WALLET_RPC = "https://rpc.testnet.nimiqwatch.com/";
+const MERCHANT_ADDRESS = "NQ09 2222 2222 2222 2222 2222 2222 2222 2222";
+
+function diagnosticTransaction(overrides = {}) {
+  return { transaction: { hash: HASH_A, sender: WALLET_ADDRESS, recipient: MERCHANT_ADDRESS,
+    value: 1_000_000, fee: 2, blockNumber: 12345, confirmations: 1,
+    recipientData: Buffer.from("prometheus:quote-1").toString("hex"), ...overrides }, executionResult: true };
+}
 
 function walletProvider(overrides = {}) {
   return {
@@ -87,7 +94,8 @@ function advancedResult(id) {
 }
 
 function mockApi({ verifyError = null, inspectError = null, pingResponses = [], healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null,
-  balanceError = null, balanceLuna = 12542000, balancesByAddress = null, rpcNetwork = "TestAlbatross" } = {}) {
+  balanceError = null, balanceLuna = 12542000, balancesByAddress = null, rpcNetwork = "TestAlbatross",
+  transactionResponses = [], quoteRecipient = "NQ43 TEST" } = {}) {
   let quoteNumber = 0;
   let inspectNumber = 0;
   const quotes = new Map();
@@ -98,9 +106,15 @@ function mockApi({ verifyError = null, inspectError = null, pingResponses = [], 
       if (request.method === "getLatestBlock") return response({ result: { data: { network: rpcNetwork } } });
       if (request.method === "getAccountByAddress") {
         if (balanceError) throw balanceError;
-        const balance = balancesByAddress?.[request.params[0]] ?? balanceLuna;
+        let balance = balancesByAddress?.[request.params[0]] ?? balanceLuna;
+        if (Array.isArray(balance)) balance = balance.length > 1 ? balance.shift() : balance[0];
         if (balance instanceof Error) throw balance;
         return response({ result: { data: { balance } } });
+      }
+      if (request.method === "getTransactionByHash") {
+        const transaction = transactionResponses.length > 1 ? transactionResponses.shift() : transactionResponses[0];
+        if (transaction instanceof Error) throw transaction;
+        return response({ result: { data: transaction ?? null } });
       }
       throw new Error(`Unexpected RPC method: ${request.method}`);
     }
@@ -127,7 +141,7 @@ function mockApi({ verifyError = null, inspectError = null, pingResponses = [], 
       const id = `quote-${quoteNumber}`;
       quotes.set(id, sourceJobId);
       return response({ id, source_job_id: sourceJobId, token: `token-${quoteNumber}`,
-        recipient: "NQ43 TEST", amount_luna: 1_000_000, memo: `prometheus:${id}` });
+        recipient: quoteRecipient, amount_luna: 1_000_000, memo: `prometheus:${id}` });
     }
     if (path.includes("/verify")) {
       if (verifyError) throw verifyError;
@@ -176,6 +190,281 @@ describe("basic inspection and per-job payment", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps TEST payment diagnostics hidden and inactive on ordinary production-style launches", async () => {
+    initMock.mockResolvedValue(walletProvider());
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic").classList.contains("hidden")).toBe(true);
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-report").textContent).toBe("");
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(2);
+  });
+
+  it("captures one opt-in TEST payment, exact hash, approved balances and backend observations without changing payments or the header", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ quoteRecipient: MERCHANT_ADDRESS, transactionResponses: [diagnosticTransaction()], balancesByAddress: {
+      [WALLET_ADDRESS]: [12_000_000, 12_000_000, 10_999_998], [SECOND_WALLET_ADDRESS]: 2_000_000,
+    } });
+    await import("./app.js");
+    await flush();
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic").classList.contains("hidden")).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(4);
+    expect(document.getElementById("payment-diagnostic-report").textContent).toBe("");
+    document.getElementById("payment-diagnostic-arm").click();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    expect(document.getElementById("payment-diagnostic-status").textContent).toContain("Capture armed");
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    await flush();
+    const report = document.getElementById("payment-diagnostic-report").textContent;
+    expect(report).toContain("Returned addresses from Connect: 2");
+    expect(report).toContain("Selected by Prometheus: NQ07…0000");
+    expect(report).toContain("14000000 Luna (140.00 NIM)");
+    expect(report).toContain("12999998 Luna (129.99998 NIM)");
+    expect(report).toContain(`SDK-returned transaction hash: ${HASH_A}`);
+    expect(report).toContain("Included; execution successful");
+    expect(report).toContain("Sender is in approved-address set: Yes");
+    expect(report).toContain("Memo matches quote: Yes");
+    expect(report).toContain("Recipient matches quote: Yes");
+    expect(report).toContain("Exact 10 NIM value: Yes");
+    expect(report).toContain("Fee: 2 Luna (0.00002 NIM)");
+    expect(report).toContain("Block height: 12345");
+    expect(report).toContain("Approved-address sum net deduction: 1000002 Luna (10.00002 NIM)");
+    expect(report).toContain("Backend state: verified");
+    expect(report).toContain("Backend exact hash matches SDK: Yes");
+    expect(report).toContain("Backend source job matches quote: Yes");
+    expect(report).toContain("Advanced job accepted after verification: advanced-basic-1");
+    expect(report).not.toContain("token-1");
+    expect(report).not.toContain(WALLET_ADDRESS);
+    expect(document.getElementById("wallet-connect").textContent).toBe("140.00 NIM · NQ07…0000");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledExactlyOnceWith({ recipient: MERCHANT_ADDRESS, value: 1_000_000, data: "prometheus:quote-1" });
+    const rpcCalls = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).map(([, options]) => JSON.parse(options.body));
+    expect(rpcCalls.filter((call) => call.method === "getTransactionByHash")).toEqual([
+      { jsonrpc: "2.0", id: 1, method: "getTransactionByHash", params: [HASH_A] },
+    ]);
+    expect(new Set(rpcCalls.filter((call) => call.method === "getAccountByAddress").map((call) => call.params[0]))).toEqual(new Set([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]));
+    for (const [url, options] of fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC)) {
+      if (typeof options?.body === "string") expect(options.body).not.toContain(WALLET_ADDRESS);
+    }
+    expect(localStorage.getItem(RECOVERY_KEY)).not.toContain("diagnostic");
+    document.getElementById("again-btn").click();
+    chooseVideo("second.mp4");
+    await completeBasic();
+    provider.sendBasicTransactionWithData.mockResolvedValue(HASH_B);
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(2);
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain(HASH_A);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes")).toHaveLength(2);
+  });
+
+  it("reports a spending address outside the approved set without querying that unrelated address", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    initMock.mockResolvedValue(walletProvider());
+    const fetchMock = mockApi({ transactionResponses: [diagnosticTransaction({ sender: SECOND_WALLET_ADDRESS })] });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain("Sender is in approved-address set: No");
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain("No unrelated address was queried");
+    const reads = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).map(([, options]) => JSON.parse(options.body)).filter((call) => call.method === "getAccountByAddress");
+    expect(reads.every((call) => call.params[0] === WALLET_ADDRESS)).toBe(true);
+  });
+
+  it("retains unavailable before-balances instead of a false zero and never blocks a valid payment", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    mockApi({ transactionResponses: [diagnosticTransaction()], balancesByAddress: { [WALLET_ADDRESS]: [12_000_000, new Error("RPC failed"), 11_000_000] } });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain("Sum of approved addresses only: Unavailable");
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain("Approved-address sum net deduction: Unavailable");
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only read-only transaction lookups until inclusion, with no duplicate payment or analysis", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ transactionResponses: [diagnosticTransaction({ blockNumber: null, confirmations: 0 }), diagnosticTransaction()] });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    vi.useFakeTimers();
+    document.getElementById("upgrade-btn").click();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain("Pending / not included");
+    expect(document.getElementById("payment-diagnostic-report").textContent).not.toContain("After inclusion:");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(document.getElementById("payment-diagnostic-status").textContent).toContain("Capture complete");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(1);
+  });
+
+  it("bounds diagnostic RPC failures to 90 seconds without blocking or retrying payment", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ transactionResponses: [new Error("RPC unreachable")] });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    vi.useFakeTimers();
+    document.getElementById("upgrade-btn").click();
+    await vi.advanceTimersByTimeAsync(92000);
+    expect(document.getElementById("payment-diagnostic-status").textContent).toContain("Diagnostic lookup timed out");
+    expect(document.getElementById("payment-diagnostic-report").textContent).toContain(HASH_A);
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(1);
+  });
+
+  it("ends the diagnostic on a cancelled wallet request without looking up or sending a second transaction", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider({ sendBasicTransactionWithData: vi.fn().mockRejectedValue(Object.assign(new Error("Rejected"), { code: 4001 })) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-status").textContent).toContain("without a valid hash");
+    expect(fetchMock.mock.calls.filter(([url, options]) => url === WALLET_RPC && JSON.parse(options.body).method === "getTransactionByHash")).toHaveLength(0);
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/analyze")).toHaveLength(0);
+  });
+
+  it("clears diagnostic state on local Disconnect and ignores a late before-balance result", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    initMock.mockResolvedValue(walletProvider());
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    let finishRead;
+    globalThis.fetch = vi.fn(async (url, options = {}) => {
+      if (url === WALLET_RPC && JSON.parse(options.body).method === "getAccountByAddress") {
+        return new Promise((resolve) => { finishRead = resolve; });
+      }
+      return fetchMock(url, options);
+    });
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    document.getElementById("wallet-disconnect").click();
+    finishRead(response({ result: { data: { balance: 1000000 } } }));
+    await flush();
+    expect(document.getElementById("payment-diagnostic-report").textContent).toBe("");
+    expect(document.getElementById("payment-diagnostic").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+  });
+
+  it("does not delay payments or arm a misleading capture if the before-snapshot is still in flight", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    let finishRead;
+    globalThis.fetch = vi.fn(async (url, options = {}) => {
+      if (url === WALLET_RPC && JSON.parse(options.body).method === "getAccountByAddress") {
+        return new Promise((resolve) => { finishRead = resolve; });
+      }
+      return fetchMock(url, options);
+    });
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("payment-diagnostic-status").textContent).toContain("Payment started before");
+    finishRead(response({ result: { data: { balance: 1000000 } } }));
+    await flush();
+    expect(document.getElementById("payment-diagnostic-status").textContent).not.toContain("Capture armed");
+  });
+
+  it("stops diagnostic transaction reads on an unverified Testnet network without changing the payment outcome", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    globalThis.fetch = vi.fn(async (url, options = {}) => {
+      if (url === WALLET_RPC && JSON.parse(options.body).method === "getLatestBlock") {
+        return response({ result: { data: { network: "MainAlbatross" } } });
+      }
+      return fetchMock(url, options);
+    });
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-status").textContent).toContain("RPC did not confirm Testnet");
+    expect(fetchMock.mock.calls.filter(([url, options]) => url === WALLET_RPC && JSON.parse(options.body).method === "getTransactionByHash")).toHaveLength(0);
+    expect(document.getElementById("res-summary").textContent).toBe("Advanced result");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
   });
 
   it("starts with Connect and never requests accounts or balances on load, focus, or online", async () => {

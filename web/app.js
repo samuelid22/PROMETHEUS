@@ -13,6 +13,9 @@ const API_HEALTH_DEADLINE_MS = 100000;
 // Public, read-only Testnet RPC already used as the project's backend default.
 // Keep separate from the injected wallet's network: getNetwork() reports only "nimiq".
 const WALLET_TESTNET_RPC_URL = "https://rpc.testnet.nimiqwatch.com/";
+// Never exposed on production or other previews; no hosting environment change needed.
+const PAYMENT_DIAGNOSTICS_ENABLED = /^prometheus-git-upload-ping-canary-[a-z0-9-]+\.vercel\.app$/.test(window.location.hostname)
+  || (import.meta.env.MODE === "test" && import.meta.env.VITE_TEST_PAYMENT_DIAGNOSTICS === "true");
 
 const PROCESS_STEPS = [
   { id: "uploading", label: "Uploading" },
@@ -71,6 +74,11 @@ const els = {
   walletMessage: document.getElementById("wallet-message"),
   walletDisconnect: document.getElementById("wallet-disconnect"),
   walletDisconnectNote: document.getElementById("wallet-disconnect-note"),
+  paymentDiagnostic: document.getElementById("payment-diagnostic"),
+  paymentDiagnosticArm: document.getElementById("payment-diagnostic-arm"),
+  paymentDiagnosticStatus: document.getElementById("payment-diagnostic-status"),
+  paymentDiagnosticReport: document.getElementById("payment-diagnostic-report"),
+  paymentDiagnosticCopy: document.getElementById("payment-diagnostic-copy"),
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
   fileCard: document.getElementById("file-card"),
@@ -142,6 +150,9 @@ let walletConsensus = false;
 let walletConnecting = false;
 let walletSession = 0;
 let walletMessage = "";
+// Opt-in TEST diagnostics only: no storage, backend telemetry or account permissions.
+let diagnosticAccounts = [];
+let paymentDiagnostic = null;
 let apiReady = false;
 let apiReadyTask = null;
 let pendingPayment = recovery.payment || null;
@@ -395,6 +406,7 @@ function renderWallet() {
   els.walletMessage.textContent = walletMessage;
   els.walletDisconnect.classList.toggle("hidden", !walletAddress);
   els.walletDisconnectNote.classList.toggle("hidden", !walletAddress);
+  els.paymentDiagnostic.classList.toggle("hidden", !PAYMENT_DIAGNOSTICS_ENABLED || !walletAddress || walletConnecting);
 }
 
 function formatWalletBalance(luna) {
@@ -468,6 +480,220 @@ async function readApprovedTestnetBalance(accounts) {
   };
 }
 
+function diagnosticAddress(address) {
+  const compact = String(address || "").replace(/\s+/g, "").toUpperCase();
+  return /^NQ\d{2}[0-9A-Z]{32}$/.test(compact) ? compact : null;
+}
+
+function shortDiagnosticAddress(address) {
+  const compact = diagnosticAddress(address);
+  return compact ? `${compact.slice(0, 4)}…${compact.slice(-4)}` : "Unavailable";
+}
+
+async function diagnosticSnapshot(accounts) {
+  const started = new Date().toISOString();
+  const unique = new Map();
+  for (const account of accounts) {
+    const address = diagnosticAddress(account);
+    if (address && !unique.has(address)) unique.set(address, account);
+  }
+  const addresses = [...unique.keys()];
+  const reads = await Promise.allSettled([...unique.values()].map(readWalletTestnetBalance));
+  const entries = addresses.map((address, index) => ({
+    address, luna: reads[index].status === "fulfilled" ? reads[index].value : null,
+  }));
+  const total = entries.reduce((sum, entry) => sum + (entry.luna ?? 0), 0);
+  const complete = addresses.length > 0 && accounts.every(diagnosticAddress)
+    && entries.every((entry) => entry.luna !== null) && Number.isSafeInteger(total);
+  return { started, finished: new Date().toISOString(), entries, luna: complete ? total : null };
+}
+
+function diagnosticAmount(luna) {
+  return Number.isSafeInteger(luna) ? `${luna} Luna (${formatWalletBalance(luna)})` : "Unavailable";
+}
+
+function renderPaymentDiagnostic() {
+  const diagnostic = paymentDiagnostic;
+  els.paymentDiagnosticArm.disabled = Boolean(diagnostic && ["reading", "armed", "awaiting-hash", "tracking"].includes(diagnostic.phase));
+  els.paymentDiagnosticStatus.textContent = diagnostic?.status || "Open this diagnostic before one fresh 10 NIM Advanced Analysis payment.";
+  els.paymentDiagnosticCopy.disabled = !diagnostic;
+  if (!diagnostic) {
+    els.paymentDiagnosticReport.textContent = "";
+    return;
+  }
+  const lines = ["Prometheus TEST-only payment diagnostic", "Network balance source: TESTNET (TestAlbatross)",
+    `RPC: ${WALLET_TESTNET_RPC_URL}`, `Returned addresses from Connect: ${diagnostic.accounts.length}`,
+    `Selected by Prometheus: ${shortDiagnosticAddress(diagnostic.selected)}`,
+    `Header at capture: ${diagnostic.header}`, "Testnet on-chain balance snapshots (not atomic):"];
+  for (const [name, snapshot] of [["Before", diagnostic.before], ["After inclusion", diagnostic.after]]) {
+    if (!snapshot) continue;
+    lines.push(`${name}: ${snapshot.started} → ${snapshot.finished}`);
+    for (const entry of snapshot.entries) {
+      lines.push(`  ${shortDiagnosticAddress(entry.address)}${entry.address === diagnosticAddress(diagnostic.selected) ? " [selected]" : ""}: ${diagnosticAmount(entry.luna)}`);
+    }
+    lines.push(`  Sum of approved addresses only: ${diagnosticAmount(snapshot.luna)}`);
+  }
+  if (diagnostic.quote) {
+    lines.push(`Source analysis job: ${diagnostic.quote.sourceJobId}`, `Fresh quote: ${diagnostic.quote.id}`,
+      `Expected recipient: ${shortDiagnosticAddress(diagnostic.quote.recipient)}`,
+      `Expected value: ${diagnosticAmount(diagnostic.quote.value)}`, `Expected memo: ${diagnostic.quote.memo}`);
+  }
+  if (diagnostic.hash) lines.push(`SDK-returned transaction hash: ${diagnostic.hash}`, `Hash returned at: ${diagnostic.hashTime}`);
+  const transaction = diagnostic.transaction;
+  if (transaction) {
+    const sender = diagnosticAddress(transaction.sender);
+    const belongs = sender && diagnostic.before?.entries.some((entry) => entry.address === sender);
+    lines.push(`Transaction state: ${transaction.state}`, `Sender: ${shortDiagnosticAddress(sender)}`,
+      `Sender is in approved-address set: ${sender ? (belongs ? "Yes" : "No") : "Unavailable"}`,
+      `Recipient: ${shortDiagnosticAddress(transaction.recipient)}`, `Value: ${diagnosticAmount(transaction.value)}`,
+      `Fee: ${diagnosticAmount(transaction.fee)}`, `Memo matches quote: ${transaction.memoMatches ? "Yes" : "No / unavailable"}`,
+      `Recipient matches quote: ${transaction.recipientMatches ? "Yes" : "No / unavailable"}`,
+      `Exact 10 NIM value: ${transaction.value === diagnostic.quote.value ? "Yes" : "No / unavailable"}`,
+      `Block height: ${transaction.block ?? "Not included"}`, `Confirmations: ${transaction.confirmations ?? "Unavailable"}`);
+    const cost = transaction.value + transaction.fee;
+    lines.push(`Expected sender deduction (value + fee): ${Number.isSafeInteger(transaction.value) && Number.isSafeInteger(transaction.fee) && Number.isSafeInteger(cost) ? diagnosticAmount(cost) : "Unavailable"}`);
+    if (diagnostic.after) {
+      for (const before of diagnostic.before.entries) {
+        const after = diagnostic.after.entries.find((entry) => entry.address === before.address);
+        const delta = Number.isSafeInteger(before.luna) && Number.isSafeInteger(after?.luna) ? before.luna - after.luna : null;
+        lines.push(`  ${shortDiagnosticAddress(before.address)} net deduction: ${diagnosticAmount(delta)}${before.address === sender ? " [sender]" : ""}`);
+      }
+      const delta = diagnostic.before.luna !== null && diagnostic.after.luna !== null ? diagnostic.before.luna - diagnostic.after.luna : null;
+      lines.push(`Approved-address sum net deduction: ${diagnosticAmount(delta)}`);
+      if (!belongs) lines.push("Sender before/after balance not captured: sender was not an approved address. No unrelated address was queried.");
+    }
+  }
+  if (diagnostic.verification) {
+    lines.push(`Backend verification HTTP: ${diagnostic.verification.http}`, `Backend state: ${diagnostic.verification.state}`,
+      `Backend exact hash matches SDK: ${diagnostic.verification.hashMatches ? "Yes" : "No"}`,
+      `Backend source job matches quote: ${diagnostic.verification.jobMatches ? "Yes" : "No"}`);
+  }
+  if (diagnostic.advancedJob) lines.push(`Advanced job accepted after verification: ${diagnostic.advancedJob}`);
+  lines.push("No inference about replenishment: net balances alone do not identify incoming transfers.",
+    "This report observes the existing verification response; it does not inspect the backend database or prove consumption history.",
+    "Header remains the original Connect-time snapshot; payment source selection is unchanged.");
+  els.paymentDiagnosticReport.textContent = lines.join("\n");
+}
+
+async function armPaymentDiagnostic() {
+  if (!PAYMENT_DIAGNOSTICS_ENABLED || !walletAddress || walletConnecting || actionBusy || els.paymentDiagnosticArm.disabled) return;
+  const diagnostic = { accounts: diagnosticAccounts.slice(), selected: walletAddress, header: walletBalanceText(),
+    phase: "reading", status: "Reading before-payment Testnet on-chain balances. Wait for capture to be armed before paying." };
+  paymentDiagnostic = diagnostic;
+  renderPaymentDiagnostic();
+  diagnostic.before = await diagnosticSnapshot(diagnostic.accounts);
+  if (paymentDiagnostic !== diagnostic || diagnostic.phase !== "reading") return;
+  diagnostic.phase = "armed";
+  diagnostic.status = diagnostic.before.luna === null
+    ? "Capture armed, but some before-balances are unavailable. A complete before/after comparison will not be possible."
+    : "Capture armed. Now approve ONE fresh 10 NIM Advanced Analysis payment normally. Do not refresh this page.";
+  renderPaymentDiagnostic();
+}
+
+async function diagnosticRpc(method, params) {
+  const response = await fetchWithTimeout(WALLET_TESTNET_RPC_URL, {
+    method: "POST", credentials: "omit", referrerPolicy: "no-referrer",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  }, 10000);
+  if (!response.ok) throw new Error("RPC unavailable");
+  const payload = await response.json();
+  if (payload.error) throw new Error("Transaction lookup unavailable or not yet indexed");
+  return payload.result?.data;
+}
+
+function diagnosticMemoMatches(value, memo) {
+  try {
+    const bytes = Array.isArray(value) ? value : String(value || "").replace(/^0x/, "").match(/.{2}/g)?.map((hex) => parseInt(hex, 16));
+    return Array.isArray(bytes) && bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+      && String.fromCharCode(...bytes) === memo;
+  } catch { return false; }
+}
+
+async function captureDiagnosticTransaction(diagnostic) {
+  const deadline = Date.now() + 90000;
+  while (paymentDiagnostic === diagnostic && Date.now() < deadline) {
+    try {
+      const block = await diagnosticRpc("getLatestBlock", [false]);
+      if (block?.network !== "TestAlbatross") {
+        diagnostic.phase = "finished";
+        diagnostic.status = "Diagnostic stopped: RPC did not confirm Testnet. Payment behavior was not changed.";
+        renderPaymentDiagnostic();
+        return;
+      }
+      const data = await diagnosticRpc("getTransactionByHash", [diagnostic.hash]);
+      const raw = data?.transaction || data;
+      if (!raw || String(raw.hash || raw.transactionHash || "").toLowerCase() !== diagnostic.hash) throw new Error("Transaction not found or hash mismatch");
+      const included = Number.isSafeInteger(raw.blockNumber) && raw.blockNumber >= 0;
+      const execution = raw.executionResult ?? data.executionResult;
+      diagnostic.transaction = {
+        state: included ? (execution === true ? "Included; execution successful" : execution === false ? "Included; execution failed" : "Included; execution unavailable") : "Pending / not included",
+        sender: raw.from || raw.sender, recipient: raw.to || raw.recipient,
+        value: Number.isSafeInteger(raw.value) && raw.value >= 0 ? raw.value : null,
+        fee: Number.isSafeInteger(raw.fee) && raw.fee >= 0 ? raw.fee : null,
+        block: included ? raw.blockNumber : null, confirmations: Number.isSafeInteger(raw.confirmations) ? raw.confirmations : null,
+        memoMatches: diagnosticMemoMatches(raw.recipientData ?? raw.data, diagnostic.quote.memo),
+        recipientMatches: Boolean(diagnosticAddress(raw.to || raw.recipient)) && diagnosticAddress(raw.to || raw.recipient) === diagnosticAddress(diagnostic.quote.recipient),
+      };
+      if (included && raw.confirmations >= 1) {
+        diagnostic.after = await diagnosticSnapshot(diagnostic.accounts);
+        if (paymentDiagnostic !== diagnostic) return;
+        diagnostic.phase = "finished";
+        diagnostic.status = "Capture complete. Copy this diagnostic report; compare it with the Nimiq Pay dashboard.";
+        renderPaymentDiagnostic();
+        return;
+      }
+      diagnostic.status = "Exact transaction found, waiting for inclusion before the after-balance snapshot.";
+    } catch {
+      diagnostic.status = "Waiting for Testnet RPC inclusion/indexing. This read-only diagnostic does not retry payments.";
+    }
+    if (paymentDiagnostic !== diagnostic) return;
+    renderPaymentDiagnostic();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  if (paymentDiagnostic === diagnostic) {
+    diagnostic.phase = "finished";
+    diagnostic.status = "Diagnostic lookup timed out. Hash is retained here; no payment was retried. Copy the report.";
+    renderPaymentDiagnostic();
+  }
+}
+
+// Observers never gate, authorize, retry or throw into the existing payment flow.
+function observePaymentDiagnostic(event, data) {
+  if (!PAYMENT_DIAGNOSTICS_ENABLED || !paymentDiagnostic) return;
+  try {
+    const diagnostic = paymentDiagnostic;
+    if (event === "quote" && diagnostic.phase === "reading") {
+      diagnostic.phase = "finished";
+      diagnostic.status = "Payment started before the before-balance snapshot finished. This payment was not captured; the payment flow was not blocked.";
+    } else if (event === "quote" && diagnostic.phase === "armed") {
+      if (paymentConfig?.network !== "testnet" || data.amount_luna !== 1000000) return;
+      diagnostic.quote = { id: data.id, sourceJobId: data.source_job_id, recipient: data.recipient, value: data.amount_luna, memo: data.memo };
+      diagnostic.phase = "awaiting-hash";
+      diagnostic.status = "Waiting for your existing Nimiq Pay request to return its transaction hash.";
+    } else if (event === "hash" && diagnostic.phase === "awaiting-hash" && data.quoteId === diagnostic.quote?.id) {
+      diagnostic.hash = data.hash;
+      diagnostic.hashTime = new Date().toISOString();
+      diagnostic.phase = "tracking";
+      diagnostic.status = "Hash captured. Looking up this exact transaction on Testnet.";
+      void captureDiagnosticTransaction(diagnostic).catch(() => {
+        if (paymentDiagnostic !== diagnostic) return;
+        diagnostic.phase = "finished";
+        diagnostic.status = "Diagnostic unavailable; existing payment behavior is unaffected.";
+        renderPaymentDiagnostic();
+      });
+    } else if (event === "verified" && data.quoteId === diagnostic.quote?.id && diagnostic.hash === data.hash) {
+      diagnostic.verification = { http: data.http, state: data.state, hashMatches: data.returnedHash?.toLowerCase() === diagnostic.hash, jobMatches: data.sourceJobId === diagnostic.quote.sourceJobId };
+    } else if (event === "advanced" && data.quoteId === diagnostic.quote?.id && diagnostic.verification) {
+      diagnostic.advancedJob = data.jobId;
+    } else if (event === "error" && data.sourceJobId === diagnostic.quote?.sourceJobId && diagnostic.phase === "awaiting-hash") {
+      diagnostic.phase = "finished";
+      diagnostic.status = "Wallet request ended without a valid hash. No transaction lookup or payment retry was made by the diagnostic.";
+    }
+    renderPaymentDiagnostic();
+  } catch { /* Diagnostics must not interfere with payments. */ }
+}
+
 async function connectWallet() {
   if (walletConnecting) return;
   if (walletAddress) {
@@ -493,6 +719,7 @@ async function connectWallet() {
       return;
     }
     walletAddress = address;
+    if (PAYMENT_DIAGNOSTICS_ENABLED) diagnosticAccounts = accounts.slice();
     renderWallet();
     setWalletPopover(true);
     // Separate wallet consensus from the independently verified Testnet balance source.
@@ -532,6 +759,9 @@ function disconnectWallet() {
   walletConsensus = false;
   walletConnecting = false;
   walletMessage = "";
+  diagnosticAccounts = [];
+  paymentDiagnostic = null;
+  renderPaymentDiagnostic();
   renderWallet();
   setWalletPopover(false);
   els.walletConnect.focus();
@@ -539,6 +769,8 @@ function disconnectWallet() {
 
 els.walletConnect.addEventListener("click", connectWallet);
 els.walletDisconnect.addEventListener("click", disconnectWallet);
+els.paymentDiagnosticArm.addEventListener("click", armPaymentDiagnostic);
+els.paymentDiagnosticCopy.addEventListener("click", () => copyText(els.paymentDiagnosticReport.textContent, els.paymentDiagnosticCopy));
 document.addEventListener("click", (event) => {
   if (!els.walletSession.contains(event.target)) setWalletPopover(false);
 });
@@ -823,6 +1055,7 @@ async function startAdvancedAnalysis(payment) {
     throw new Error(data.detail || `could not start analysis (${response.status})`);
   }
   currentJobId = data.job_id;
+  observePaymentDiagnostic("advanced", { quoteId: payment.quoteId, jobId: data.job_id });
   persistRecovery();
   startPolling(currentJobId);
 }
@@ -847,6 +1080,8 @@ async function waitForPayment(quoteId, txHash, expectedSourceJobId) {
       if (txHash && data.tx_hash?.toLowerCase() !== txHash.toLowerCase()) {
         throw new Error("Payment verification returned a different transaction hash.");
       }
+      observePaymentDiagnostic("verified", { quoteId, hash: txHash, http: response.status,
+        state: data.state, returnedHash: data.tx_hash, sourceJobId: data.source_job_id });
       return data;
     }
     if (response.status !== 409) {
@@ -900,6 +1135,7 @@ async function startPaidAnalysis(errorBox = els.uploadError) {
     if (quote.source_job_id !== basicJobId) throw new Error("Payment quote was created for a different analysis job.");
     pendingPayment = { sourceJobId: basicJobId, quoteId: quote.id, token: quote.token, txHash: null };
     persistRecovery();
+    observePaymentDiagnostic("quote", quote);
     const result = await nimiq.sendBasicTransactionWithData({
       recipient: quote.recipient,
       value: quote.amount_luna,
@@ -916,11 +1152,13 @@ async function startPaidAnalysis(errorBox = els.uploadError) {
     }
     pendingPayment.txHash = result.toLowerCase();
     persistRecovery();
+    observePaymentDiagnostic("hash", { quoteId: quote.id, hash: pendingPayment.txHash });
     await waitForPayment(quote.id, pendingPayment.txHash, basicJobId);
     paymentVerified = true;
     els.paymentStatus.textContent = "Payment confirmed. Starting advanced analysis…";
     await startAdvancedAnalysis(pendingPayment);
   } catch (error) {
+    observePaymentDiagnostic("error", { sourceJobId: basicJobId });
     const errorKind = walletErrorKind(error);
     const cancelled = errorKind === "cancelled";
     if (cancelled || errorKind === "invalid" || error?.paymentExpired) {

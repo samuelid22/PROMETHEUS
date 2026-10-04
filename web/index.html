@@ -29,6 +29,16 @@
         <p id="wallet-message" class="wallet-message" role="status" aria-live="polite"></p>
         <button id="wallet-disconnect" class="secondary hidden" type="button">Disconnect</button>
         <p id="wallet-disconnect-note" class="wallet-note hidden">Disconnect clears your wallet display in Prometheus only.</p>
+        <section id="payment-diagnostic" class="hidden" aria-labelledby="payment-diagnostic-heading">
+          <h2 id="payment-diagnostic-heading">TEST-only payment diagnostic</h2>
+          <p class="wallet-note">Capture one payment you approve yourself. Public transaction details and balances stay in this page's memory. Reads use the existing Testnet RPC only.</p>
+          <button id="payment-diagnostic-arm" class="secondary" type="button">Capture next TEST payment</button>
+          <p id="payment-diagnostic-status" class="wallet-message" role="status" aria-live="polite"></p>
+          <pre id="payment-diagnostic-report" class="payment-diagnostic-report"></pre>
+          <button id="payment-diagnostic-copy" class="secondary" type="button">Copy diagnostic report</button>
+          <p class="wallet-note">If Nimiq Pay shows “Processing funds…”: Pending wallet funds may not yet appear in confirmed on-chain balance.</p>
+          <p class="wallet-note">The header is a Connect-time snapshot. This diagnostic does not refresh it or prove automatic Testnet replenishment. Disconnect or closing this page clears the diagnostic.</p>
+        </section>
       </section>
     </div>
   </div>

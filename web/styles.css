@@ -85,6 +85,8 @@ button, [role="button"] { touch-action: manipulation; }
 .wallet-message:empty { display: none; }
 .wallet-note { color: var(--muted); font-size: 11px; }
 .wallet-popover .secondary { margin-top: 14px; min-height: 42px; }
+#payment-diagnostic { margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--line); }
+.payment-diagnostic-report { max-height: 45vh; overflow: auto; color: var(--text-soft); font-family: var(--mono); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .container { width: min(100%, 810px); margin: 0 auto; padding: 0 clamp(16px, 4vw, 28px) 70px; }
 .screen { min-width: 0; padding-top: clamp(28px, 6vw, 56px); outline: none; animation: screen-in 280ms cubic-bezier(.2,.8,.2,1); }
