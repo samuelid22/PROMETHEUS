@@ -20,15 +20,15 @@
       <section id="wallet-popover" class="wallet-popover hidden" aria-labelledby="wallet-heading">
         <h2 id="wallet-heading">Wallet connection</h2>
         <dl id="wallet-details" class="wallet-details hidden">
-          <dt>Selected wallet address</dt><dd id="wallet-address" class="wallet-address"></dd>
-          <dt>Testnet on-chain balance</dt><dd id="wallet-balance">Balance unavailable</dd>
+          <dt>Verified signer address</dt><dd id="wallet-address" class="wallet-address"></dd>
+          <dt>Testnet on-chain balance across approved addresses</dt><dd id="wallet-balance">Balance unavailable</dd>
           <dt id="wallet-account-count-label" class="hidden">Approved addresses</dt><dd id="wallet-account-count" class="hidden"></dd>
           <dt>Network balance source</dt><dd class="wallet-network">TESTNET</dd>
           <dt>Wallet consensus</dt><dd id="wallet-consensus">Not established</dd>
         </dl>
         <p id="wallet-message" class="wallet-message" role="status" aria-live="polite"></p>
         <button id="wallet-disconnect" class="secondary hidden" type="button">Disconnect</button>
-        <p id="wallet-disconnect-note" class="wallet-note hidden">Disconnect clears your wallet display in Prometheus only.</p>
+        <p id="wallet-disconnect-note" class="wallet-note hidden">Verification proves control of the signer address for this page. Other approved addresses and their summed balance are separate. Disconnect clears this proof in Prometheus only.</p>
         <section id="payment-diagnostic" class="hidden" aria-labelledby="payment-diagnostic-heading">
           <h2 id="payment-diagnostic-heading">TEST-only payment diagnostic</h2>
           <p class="wallet-note">Capture one payment you approve yourself. Public transaction details and balances stay in this page's memory. Reads use the existing Testnet RPC only.</p>

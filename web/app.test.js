@@ -11,6 +11,9 @@ const HASH_B = "cd".repeat(32);
 const RECOVERY_KEY = "prometheus.recovery.v2";
 const WALLET_ADDRESS = "NQ07 0000 0000 0000 0000 0000 0000 0000 0000";
 const SECOND_WALLET_ADDRESS = "NQ08 1111 1111 1111 1111 1111 1111 1111 1111";
+const AUTH_BASE = "https://wallet-auth.test.invalid";
+const AUTH_MESSAGE = "Prometheus wallet verification\nTEST fixture challenge";
+const AUTH_ID = "12".repeat(16);
 const WALLET_RPC = "https://rpc.testnet.nimiqwatch.com/";
 const MERCHANT_ADDRESS = "NQ09 2222 2222 2222 2222 2222 2222 2222 2222";
 
@@ -22,6 +25,7 @@ function diagnosticTransaction(overrides = {}) {
 
 function walletProvider(overrides = {}) {
   return {
+    sign: vi.fn().mockResolvedValue({ publicKey: "ab".repeat(32), signature: "cd".repeat(64) }),
     listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS]),
     isConsensusEstablished: vi.fn().mockResolvedValue(true),
     sendBasicTransactionWithData: vi.fn().mockResolvedValue(HASH_A),
@@ -95,12 +99,26 @@ function advancedResult(id) {
 
 function mockApi({ verifyError = null, inspectError = null, pingResponses = [], healthResponses = [], readyResponses = [], jobStatuses = [], jobStatusError = null,
   balanceError = null, balanceLuna = 12542000, balancesByAddress = null, rpcNetwork = "TestAlbatross",
-  transactionResponses = [], quoteRecipient = "NQ43 TEST" } = {}) {
+  transactionResponses = [], quoteRecipient = "NQ43 TEST", authError = null, authSigner = WALLET_ADDRESS, authHealthResponses = [] } = {}) {
+  let authAccounts = [];
   let quoteNumber = 0;
   let inspectNumber = 0;
   const quotes = new Map();
   const fetchMock = vi.fn(async (url, options = {}) => {
     const path = String(url);
+    if (path === AUTH_BASE + "/api/health") {
+      const status = authHealthResponses.length ? authHealthResponses.shift() : 200;
+      return response({ status: "ok", wallet_auth_enabled: true }, status);
+    }
+    if (path === AUTH_BASE + "/api/wallet-auth/challenge") {
+      authAccounts = JSON.parse(options.body).accounts;
+      return response({ id: AUTH_ID, message: AUTH_MESSAGE, expires_at: 1800000300 });
+    }
+    if (path === AUTH_BASE + "/api/wallet-auth/verify") {
+      if (authError instanceof Error) throw authError;
+      if (authError) return response({ detail: authError }, 401);
+      return response({ verified: true, signer_address: authSigner, approved_address_count: new Set(authAccounts.map((a) => a.replace(/\s+/g, "").toUpperCase())).size, scope: "current_page_signer" });
+    }
     if (path === WALLET_RPC) {
       const request = JSON.parse(options.body);
       if (request.method === "getLatestBlock") return response({ result: { data: { network: rpcNetwork } } });
@@ -177,6 +195,7 @@ function mockApi({ verifyError = null, inspectError = null, pingResponses = [], 
 describe("basic inspection and per-job payment", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.stubEnv("VITE_WALLET_AUTH_BASE_URL", AUTH_BASE);
     initMock.mockReset();
     document.open();
     document.write(html);
@@ -254,14 +273,14 @@ describe("basic inspection and per-job payment", () => {
     expect(report).toContain("Advanced job accepted after verification: advanced-basic-1");
     expect(report).not.toContain("token-1");
     expect(report).not.toContain(WALLET_ADDRESS);
-    expect(document.getElementById("wallet-connect").textContent).toBe("140.00 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ 140.00 NIM · NQ07…0000");
     expect(provider.sendBasicTransactionWithData).toHaveBeenCalledExactlyOnceWith({ recipient: MERCHANT_ADDRESS, value: 1_000_000, data: "prometheus:quote-1" });
     const rpcCalls = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).map(([, options]) => JSON.parse(options.body));
     expect(rpcCalls.filter((call) => call.method === "getTransactionByHash")).toEqual([
       { jsonrpc: "2.0", id: 1, method: "getTransactionByHash", params: [HASH_A] },
     ]);
     expect(new Set(rpcCalls.filter((call) => call.method === "getAccountByAddress").map((call) => call.params[0]))).toEqual(new Set([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]));
-    for (const [url, options] of fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC)) {
+    for (const [url, options] of fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC && !String(url).startsWith(AUTH_BASE))) {
       if (typeof options?.body === "string") expect(options.body).not.toContain(WALLET_ADDRESS);
     }
     expect(localStorage.getItem(RECOVERY_KEY)).not.toContain("diagnostic");
@@ -479,7 +498,111 @@ describe("basic inspection and per-job payment", () => {
     expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
     expect(document.getElementById("wallet-popover").classList.contains("hidden")).toBe(true);
     expect(provider.listAccounts).not.toHaveBeenCalled();
+    expect(provider.sign).not.toHaveBeenCalled();
+    expect(globalThis.fetch.mock.calls.filter(([url]) => String(url).startsWith(AUTH_BASE))).toHaveLength(0);
     expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(0);
+  });
+
+  it("uses the backend-derived signer rather than accounts[0], separately from the approved-address sum", async () => {
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ authSigner: SECOND_WALLET_ADDRESS, balancesByAddress: { [WALLET_ADDRESS]: 0, [SECOND_WALLET_ADDRESS]: 11005000000 } });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ 110,050.00 NIM · NQ08…1111");
+    expect(document.getElementById("wallet-address").textContent).toBe(SECOND_WALLET_ADDRESS);
+    expect(provider.sign).toHaveBeenCalledExactlyOnceWith(AUTH_MESSAGE);
+    const authCalls = fetchMock.mock.calls.filter(([url]) => String(url).startsWith(AUTH_BASE));
+    expect(authCalls.map(([url]) => url)).toEqual([AUTH_BASE + "/api/health", AUTH_BASE + "/api/wallet-auth/challenge", AUTH_BASE + "/api/wallet-auth/verify"]);
+    expect(JSON.parse(authCalls[1][1].body)).toEqual({ accounts: [WALLET_ADDRESS, SECOND_WALLET_ADDRESS] });
+    expect(JSON.parse(authCalls[2][1].body)).toEqual({ challenge_id: AUTH_ID, public_key: "ab".repeat(32), signature: "cd".repeat(64) });
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("does not mark the wallet verified merely because native signing succeeded", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    let finishVerification;
+    globalThis.fetch = vi.fn((url, options) => String(url).endsWith("/wallet-auth/verify")
+      ? new Promise((resolve) => { finishVerification = resolve; }) : fetchMock(url, options));
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(provider.sign).toHaveBeenCalledTimes(1);
+    expect(document.getElementById("wallet-connect").textContent).toBe("Verifying…");
+    expect(document.getElementById("wallet-address").textContent).toBe("");
+    finishVerification(response({ verified: true, signer_address: WALLET_ADDRESS, approved_address_count: 1, scope: "current_page_signer" }));
+    await flush();
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
+  });
+
+  it.each(["invalid_signature", "expired_challenge", "used_challenge", "missing_challenge", "signer_not_approved", new TypeError("Network unavailable")])("fails closed for backend verification error %s", async (authError) => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ authError });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-address").textContent).toBe("");
+    expect(document.getElementById("wallet-heading").textContent).not.toContain("Verified");
+    expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(0);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/wallet-auth/verify"))).toHaveLength(1);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("handles rejected native signing without verification, balances, or payment requests", async () => {
+    const provider = walletProvider({ sign: vi.fn().mockResolvedValue({ error: { type: "PermissionDeniedError", message: "Denied" } }) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-message").textContent).toContain("Signature approval was declined");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/wallet-auth/verify"))).toBe(false);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("disconnect discards an in-flight verification response and never creates a server session", async () => {
+    initMock.mockResolvedValue(walletProvider());
+    const fetchMock = mockApi();
+    let finishVerification;
+    globalThis.fetch = vi.fn((url, options) => String(url).endsWith("/wallet-auth/verify")
+      ? new Promise((resolve) => { finishVerification = resolve; }) : fetchMock(url, options));
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    document.getElementById("wallet-disconnect").click();
+    finishVerification(response({ verified: true, signer_address: WALLET_ADDRESS, approved_address_count: 1, scope: "current_page_signer" }));
+    await flush();
+    expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
+    expect(document.getElementById("wallet-address").textContent).toBe("");
+    expect(JSON.stringify(localStorage)).not.toContain("verified");
+  });
+
+  it("wakes only the TEST auth service, then requests exactly one challenge and signature", async () => {
+    vi.useFakeTimers();
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi({ authHealthResponses: [503, 503, 200] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(1000);
+    document.getElementById("wallet-connect").click();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
+    expect(fetchMock.mock.calls.filter(([url]) => url === AUTH_BASE + "/api/health")).toHaveLength(3);
+    expect(fetchMock.mock.calls.filter(([url]) => url === AUTH_BASE + "/api/wallet-auth/challenge")).toHaveLength(1);
+    expect(provider.sign).toHaveBeenCalledTimes(1);
+    expect(inspectCalls(fetchMock)).toHaveLength(0);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
   });
 
   it("connects once on an intentional click and displays Testnet balance, short address, and separate consensus", async () => {
@@ -494,22 +617,23 @@ describe("basic inspection and per-job payment", () => {
     expect(button.disabled).toBe(true);
     button.click();
     await flush();
-    expect(button.textContent).toBe("125.42 NIM · NQ07…0000");
+    expect(button.textContent).toBe("✓ 125.42 NIM · NQ07…0000");
     expect(button.disabled).toBe(false);
-    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
     expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
     expect(document.getElementById("wallet-balance").textContent).toBe("125.42 NIM");
-    expect(document.getElementById("wallet-account-count").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("wallet-account-count").classList.contains("hidden")).toBe(false);
     expect(document.querySelector(".wallet-network").textContent).toBe("TESTNET");
     expect(document.getElementById("wallet-consensus").textContent).toBe("Connected");
     expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+    expect(provider.sign).toHaveBeenCalledExactlyOnceWith(AUTH_MESSAGE);
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
     expect(initMock).toHaveBeenCalledTimes(1);
     const rpcCalls = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC);
     expect(rpcCalls.map(([, options]) => JSON.parse(options.body).method)).toEqual(["getLatestBlock", "getAccountByAddress"]);
     expect(JSON.parse(rpcCalls[1][1].body).params).toEqual([WALLET_ADDRESS]);
     expect(rpcCalls[1][1].credentials).toBe("omit");
-    expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC).some(([, options]) => String(options?.body).includes(WALLET_ADDRESS))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC && !String(url).startsWith(AUTH_BASE)).some(([, options]) => String(options?.body).includes(WALLET_ADDRESS))).toBe(false);
     expect(JSON.stringify(localStorage)).not.toContain(WALLET_ADDRESS);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/payments/quotes" || url === "/api/analyze")).toHaveLength(0);
     button.click();
@@ -527,7 +651,7 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-connect").textContent).toBe("110,050.00 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ 110,050.00 NIM · NQ07…0000");
     expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
     expect(document.getElementById("wallet-balance").textContent).toBe("110,050.00 NIM");
     expect(document.getElementById("wallet-account-count").textContent).toBe("2");
@@ -539,7 +663,7 @@ describe("basic inspection and per-job payment", () => {
     const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
       .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
     expect(queried.map((request) => request.params[0])).toEqual([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]);
-    expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC).some(([, options]) =>
+    expect(fetchMock.mock.calls.filter(([url]) => url !== WALLET_RPC && !String(url).startsWith(AUTH_BASE)).some(([, options]) =>
       String(options?.body).includes(SECOND_WALLET_ADDRESS))).toBe(false);
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
     chooseVideo();
@@ -559,11 +683,11 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-connect").textContent).toBe("Partial balance unavailable · NQ07…0000");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ Partial balance unavailable · NQ07…0000");
     expect(document.getElementById("wallet-balance").textContent).toBe("Partial balance unavailable");
     expect(document.getElementById("wallet-account-count").textContent).toBe("2");
     expect(document.getElementById("wallet-address").textContent).toBe(WALLET_ADDRESS);
-    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
   });
 
   it("counts and queries a duplicated approved address only once", async () => {
@@ -575,7 +699,7 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-connect").textContent).toBe("3.00 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ 3.00 NIM · NQ07…0000");
     expect(document.getElementById("wallet-account-count").textContent).toBe("2");
     const queried = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)
       .map(([, options]) => JSON.parse(options.body)).filter((request) => request.method === "getAccountByAddress");
@@ -590,10 +714,10 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-connect").textContent).toBe("Balance unavailable · NQ07…0000");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ Balance unavailable · NQ07…0000");
     expect(document.getElementById("wallet-balance").textContent).toBe("Balance unavailable");
     expect(document.getElementById("wallet-account-count").textContent).toBe("2");
-    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
   });
 
@@ -618,8 +742,8 @@ describe("basic inspection and per-job payment", () => {
     document.getElementById("wallet-connect").click();
     if (state === "timeout") await vi.advanceTimersByTimeAsync(10000); else await flush();
     expect(document.getElementById("wallet-consensus").textContent).toBe("Not established");
-    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
-    expect(document.getElementById("wallet-connect").textContent).toBe("125.42 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ 125.42 NIM · NQ07…0000");
   });
 
   it("keeps the wallet connected and the 10 NIM payment flow usable when balance lookup fails", async () => {
@@ -630,8 +754,8 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-connect").textContent).toBe("Balance unavailable · NQ07…0000");
-    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ Balance unavailable · NQ07…0000");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
     expect(document.getElementById("wallet-consensus").textContent).toBe("Connected");
     expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
     chooseVideo();
@@ -653,7 +777,7 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     document.getElementById("wallet-connect").click();
     await flush();
-    expect(document.getElementById("wallet-heading").textContent).toBe("Connected wallet");
+    expect(document.getElementById("wallet-heading").textContent).toBe("Verified signer ✓");
     expect(document.getElementById("wallet-balance").textContent).toBe("Balance unavailable");
     expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(1);
   });
@@ -722,7 +846,7 @@ describe("basic inspection and per-job payment", () => {
     finishInit(provider);
     await flush();
     expect(provider.listAccounts).toHaveBeenCalledTimes(1);
-    expect(document.getElementById("wallet-connect").textContent).toBe("125.42 NIM · NQ07…0000");
+    expect(document.getElementById("wallet-connect").textContent).toBe("✓ 125.42 NIM · NQ07…0000");
   });
 
   it("locally disconnects, clears the address, and leaves existing payment recovery usable", async () => {
