@@ -133,13 +133,14 @@ let paymentConfig = null;
 let nimiqPromise = null;
 let nimiqReady = false;
 let nimiqInitTask = null;
-// Wallet display is memory-only and never enters payment recovery or backend requests.
+// Current-page signer proof is memory-only; it never authorizes analysis or payments.
 let walletAddress = null;
 let walletBalanceLuna = null;
 let walletBalanceState = "unavailable";
 let walletAccountCount = 0;
 let walletConsensus = false;
 let walletConnecting = false;
+let walletPhase = "connecting";
 let walletSession = 0;
 let walletMessage = "";
 let apiReady = false;
@@ -373,24 +374,24 @@ function setWalletPopover(open) {
 function renderWallet() {
   els.walletConnect.disabled = walletConnecting;
   els.walletConnect.setAttribute("aria-busy", String(walletConnecting));
-  els.walletConnect.textContent = walletConnecting ? "Connecting…" : "Connect";
+  els.walletConnect.textContent = walletConnecting ? (walletPhase === "verifying" ? "Verifying…" : "Connecting…") : "Connect";
   if (walletAddress && !walletConnecting) {
     const compact = walletAddress.replace(/\s+/g, "");
     const balance = document.createElement("span");
     balance.className = "wallet-label-balance";
-    balance.textContent = walletBalanceText();
+    balance.textContent = `✓ ${walletBalanceText()}`;
     const address = document.createElement("span");
     address.className = "wallet-label-address";
     address.textContent = `${compact.slice(0, 4)}…${compact.slice(-4)}`;
     els.walletConnect.replaceChildren(balance, document.createTextNode(" · "), address);
   }
-  els.walletHeading.textContent = walletAddress ? "Connected wallet" : "Wallet connection";
+  els.walletHeading.textContent = walletAddress ? "Verified signer ✓" : "Wallet connection";
   els.walletDetails.classList.toggle("hidden", !walletAddress);
   els.walletAddress.textContent = walletAddress || "";
   els.walletBalance.textContent = walletBalanceText();
-  els.walletAccountCountLabel.classList.toggle("hidden", walletAccountCount <= 1);
-  els.walletAccountCount.classList.toggle("hidden", walletAccountCount <= 1);
-  els.walletAccountCount.textContent = walletAccountCount > 1 ? String(walletAccountCount) : "";
+  els.walletAccountCountLabel.classList.toggle("hidden", !walletAddress);
+  els.walletAccountCount.classList.toggle("hidden", !walletAddress);
+  els.walletAccountCount.textContent = walletAddress ? String(walletAccountCount) : "";
   els.walletConsensus.textContent = walletConsensus ? "Connected" : "Not established";
   els.walletMessage.textContent = walletMessage;
   els.walletDisconnect.classList.toggle("hidden", !walletAddress);
@@ -468,6 +469,11 @@ async function readApprovedTestnetBalance(accounts) {
   };
 }
 
+function canonicalWalletAddress(address) {
+  const compact = String(address || "").replace(/\s+/g, "").toUpperCase();
+  return /^NQ\d{2}[0-9A-Z]{32}$/.test(compact) ? compact : null;
+}
+
 async function connectWallet() {
   if (walletConnecting) return;
   if (walletAddress) {
@@ -476,6 +482,7 @@ async function connectWallet() {
   }
   const session = ++walletSession;
   walletConnecting = true;
+  walletPhase = "connecting";
   walletMessage = "";
   renderWallet();
   try {
@@ -492,7 +499,35 @@ async function connectWallet() {
       walletMessage = "No Nimiq account is available. Add an account in Nimiq Pay and try Connect again.";
       return;
     }
-    walletAddress = address;
+    walletPhase = "verifying";
+    renderWallet();
+    await waitForWalletAuth(session);
+    if (session !== walletSession) return;
+    const challenge = await walletAuthRequest("challenge", { accounts });
+    if (session !== walletSession) return;
+    if (typeof challenge.id !== "string" || typeof challenge.message !== "string" || !challenge.message) {
+      throw new Error("Verification service returned an invalid challenge. Click Connect to try again.");
+    }
+    // The host chooses the signer; never assume the first approved address signs.
+    const signed = await nimiq.sign(challenge.message);
+    if (session !== walletSession) return;
+    const signatureError = providerError(signed);
+    if (signatureError) throw signatureError;
+    if (!signed || typeof signed.publicKey !== "string" || typeof signed.signature !== "string") {
+      throw new Error("Nimiq Pay returned an invalid signing response. Your signer is not verified.");
+    }
+    const proof = await walletAuthRequest("verify", {
+      challenge_id: challenge.id, public_key: signed.publicKey, signature: signed.signature,
+    });
+    if (session !== walletSession) return;
+    const signer = canonicalWalletAddress(proof.signer_address);
+    if (proof.verified !== true || proof.scope !== "current_page_signer" || !signer
+      || !accounts.some((account) => canonicalWalletAddress(account) === signer)) {
+      throw new Error("Wallet verification did not confirm an approved signer. Click Connect to try again.");
+    }
+    // Only backend success creates the verified display identity.
+    walletAddress = proof.signer_address;
+    walletAccountCount = proof.approved_address_count;
     renderWallet();
     setWalletPopover(true);
     // Separate wallet consensus from the independently verified Testnet balance source.
@@ -502,18 +537,24 @@ async function connectWallet() {
     ]);
     if (session !== walletSession) return;
     walletConsensus = consensus.status === "fulfilled" && consensus.value === true;
-    walletAccountCount = balance.status === "fulfilled" ? balance.value.accountCount : 0;
+    walletAccountCount = balance.status === "fulfilled" ? balance.value.accountCount : proof.approved_address_count;
     walletBalanceLuna = balance.status === "fulfilled" ? balance.value.luna : null;
     walletBalanceState = balance.status === "fulfilled" ? balance.value.state : "unavailable";
     const messages = [];
     if (!walletConsensus) messages.push("Wallet consensus is not established yet.");
-    if (walletBalanceState !== "ready") messages.push(`${walletBalanceText()}. Your wallet remains connected.`);
+    if (walletBalanceState !== "ready") messages.push(`${walletBalanceText()}. Your signer remains verified.`);
     walletMessage = messages.join(" ");
   } catch (error) {
     if (session !== walletSession) return;
+    walletAddress = null;
+    walletBalanceLuna = null;
+    walletBalanceState = "unavailable";
+    walletAccountCount = 0;
+    walletConsensus = false;
     walletMessage = walletErrorKind(error) === "cancelled"
-      ? "Account access was declined. Click Connect to try again."
-      : "Open in Nimiq Pay to connect.";
+      ? (walletPhase === "verifying" ? "Signature approval was declined. Your signer is not verified. Click Connect to try again."
+        : "Account access was declined. Click Connect to try again.")
+      : (error?.walletAuth || walletPhase === "verifying") ? error.message : "Open in Nimiq Pay to connect.";
   } finally {
     if (session === walletSession) {
       walletConnecting = false;
@@ -521,6 +562,63 @@ async function connectWallet() {
       if (walletMessage) setWalletPopover(true);
     }
   }
+}
+
+function walletAuthUrl(path) {
+  const base = String(import.meta.env.VITE_WALLET_AUTH_BASE_URL || "").trim();
+  if (!base) {
+    const error = new Error("TEST wallet verification is not configured. Your signer is not verified.");
+    error.walletAuth = true;
+    throw error;
+  }
+  const parsed = new URL(base);
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || !["", "/"].includes(parsed.pathname)) {
+    throw new Error("TEST wallet verification requires a backend origin without credentials or a path.");
+  }
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname))) {
+    throw new Error("TEST wallet verification requires a secure backend URL.");
+  }
+  return `${parsed.origin}/api/${path}`;
+}
+
+async function waitForWalletAuth(session) {
+  const url = walletAuthUrl("health");
+  const deadline = Date.now() + API_HEALTH_DEADLINE_MS;
+  while (session === walletSession && Date.now() < deadline) {
+    try {
+      const response = await fetchWithTimeout(url, { credentials: "omit", cache: "no-store" }, 10000);
+      const data = response.ok && await response.json();
+      if (data?.status === "ok" && data.wallet_auth_enabled === true) return;
+    } catch { /* Only liveness is retried; neither challenges nor signatures are retried. */ }
+    if (session === walletSession) await new Promise((resolve) => setTimeout(resolve, API_HEALTH_RETRY_MS));
+  }
+  if (session === walletSession) throw new Error("Wallet verification service is unavailable. Your signer is not verified. Click Connect to try again.");
+}
+
+async function walletAuthRequest(operation, body) {
+  let response;
+  try {
+    response = await fetchWithTimeout(walletAuthUrl(`wallet-auth/${operation}`), {
+      method: "POST", credentials: "omit", cache: "no-store",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }, REQUEST_TIMEOUT_MS);
+  } catch {
+    throw new Error("Wallet verification service is unavailable. Your signer is not verified. Click Connect to try again.");
+  }
+  const data = await response.json();
+  if (!response.ok) {
+    const messages = {
+      expired_challenge: "Verification expired. Click Connect to request a fresh challenge.",
+      used_challenge: "Verification challenge was already used. Click Connect to request a fresh challenge.",
+      missing_challenge: "Verification challenge is no longer available. Click Connect to try again.",
+      invalid_signature: "Signature verification failed. Your signer is not verified.",
+      signer_not_approved: "The signing address was not approved for this connection. Your signer is not verified.",
+      invalid_address: "Nimiq Pay returned an invalid address. Your signer is not verified.",
+      rate_limited: "Too many verification attempts. Wait a minute, then click Connect.",
+    };
+    throw new Error(messages[data.detail] || "Wallet verification failed. Your signer is not verified. Click Connect to try again.");
+  }
+  return data;
 }
 
 function disconnectWallet() {
@@ -531,6 +629,7 @@ function disconnectWallet() {
   walletAccountCount = 0;
   walletConsensus = false;
   walletConnecting = false;
+  walletPhase = "connecting";
   walletMessage = "";
   renderWallet();
   setWalletPopover(false);

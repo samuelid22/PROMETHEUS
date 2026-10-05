@@ -1,0 +1,8 @@
+# Separate TEST-only wallet proof service. No video, AI or payment endpoints.
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN pip install --no-cache-dir 'fastapi>=0.115,<1' 'uvicorn>=0.30,<1' 'cryptography>=46.0.0,<47'
+COPY prometheus/api/wallet_auth.py ./wallet_auth.py
+EXPOSE 10000
+CMD ["sh", "-c", "uvicorn wallet_auth:app --host 0.0.0.0 --port ${PORT:-10000} --no-proxy-headers"]

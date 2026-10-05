@@ -1,5 +1,71 @@
 # Prometheus Hackathon Deployment
 
+## Wallet signer verification
+
+The verified-wallet implementation was physically tested in Nimiq Pay on
+`upload-ping-canary` before promotion to `main`. The proof identifies only the
+signing address; balances and payments remain separate.
+
+Create a separate **Render Free** Docker service from `main` for production,
+using `Dockerfile.wallet-auth`. Keep the existing TEST auth service separate
+on `upload-ping-canary`. On each auth service, set only:
+
+- `PROMETHEUS_WALLET_AUTH_ENABLED=true`
+- `PROMETHEUS_WALLET_AUTH_ORIGIN=https://<frontend-host-for-this-deployment>` (exact origin, no trailing slash)
+- `PROMETHEUS_NIMIQ_NETWORK=testnet`
+- `PROMETHEUS_WALLET_AUTH_DB=/tmp/prometheus-wallet-auth.db`
+
+Use `/api/health` as its health-check path. This service exposes only health,
+`POST /api/wallet-auth/challenge`, and `POST /api/wallet-auth/verify`.
+It needs no Gemini key, merchant address, FFmpeg, private key, seed or RPC.
+Do not reuse the production payment database. Storage is ephemeral SQLite,
+shared by verification workers; an instance replacement loses outstanding
+challenges and therefore fails closed. Expired records are cleaned every 30s.
+
+On Vercel, set `VITE_WALLET_AUTH_BASE_URL=https://<production-auth-backend-host>`
+for **Production**. Keep the separate TEST auth URL scoped to **Preview** and
+`upload-ping-canary`. Redeploy the corresponding frontend after setting it.
+Keep `VITE_API_BASE_URL` unchanged: analysis and payments still go to their
+existing backend. No auth calls occur automatically on page load.
+
+Explicit Connect requests accounts, waits for auth-service liveness, obtains
+one challenge, then asks the existing provider to sign the exact message.
+Only health GETs are retried. Challenge and verification POSTs and native
+signature requests are single-attempt. A server verification response is
+required before the UI displays a tick or the derived signer address.
+
+The server stores the exact message, canonical approved set, random ID/nonce,
+server issue/expiry times and consumed marker. Challenges expire after five
+minutes and are atomically consumed only after cryptographic verification and
+signer membership. JSON bodies are limited to 16 KiB, approved addresses to
+64, live challenges to 1,000. Rate limits per direct peer/minute are 20 issues
+and 40 verifications, plus 300 total globally; forwarded IPs are not trusted.
+Full challenges/signatures/addresses are not logged. Returned signatures are
+not stored. Origin is explicit; each service allows only its configured frontend
+origin, including the same origin in the stored challenge.
+
+Nimiq message signatures use Ed25519 over SHA256 of
+`0x16 + "Nimiq Signed Message:\n" + decimal UTF-8 byte length + UTF-8 message`.
+Address derivation uses BLAKE2b-256(public key), its first 20 bytes, Nimiq
+Base32 and NQ mod97 checksum. Sources:
+[official signed-message implementation](https://github.com/nimiq/core-rs-albatross/blob/albatross/wallet/src/wallet_account.rs),
+[official address implementation](https://github.com/nimiq/core-rs-albatross/blob/albatross/keys/src/address.rs),
+[Mini App provider reference](https://nimiq.dev/mini-apps/api-reference/nimiq-provider).
+
+**Scope:** the tick proves control of the derived signer only, not ownership
+of all accounts or cryptographic verification of their summed balance.
+The approved-address Testnet RPC balance is independently displayed.
+Proof is current-page state only, not login, not payment and not authorization
+for any other backend operation. Disconnect and reload clear the UI proof;
+no persistent session exists. A future wallet login would need a server-issued
+authenticated session, its own expiry/revocation and authorization controls.
+
+Physical check: open the corresponding frontend in Nimiq Pay, Connect, approve
+accounts, approve the native message-signing prompt, then confirm the tick,
+derived signer and summed Testnet balance. Reject signing on another Connect
+and verify no tick appears. Disconnect/reconnect and verify a new challenge.
+Finally test the existing 10 NIM Advanced Analysis payment separately.
+
 ## Architecture
 
 - Vercel Hobby hosts the Vite static bundle.
