@@ -199,6 +199,51 @@ describe("basic inspection and per-job payment", () => {
     vi.unstubAllEnvs();
   });
 
+  it("keeps the neon continue action outside the file-picker target", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    mockApi();
+    await import("./app.js");
+    await flush();
+    const picker = vi.spyOn(document.getElementById("file-input"), "click");
+    const dropzone = document.getElementById("dropzone");
+    const action = document.getElementById("analyze-btn");
+    expect(dropzone.contains(action)).toBe(false);
+    expect(action.closest(".upload-shell")).not.toBeNull();
+    document.querySelector(".upload-orb").click();
+    expect(picker).toHaveBeenCalledTimes(1);
+    dropzone.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(picker).toHaveBeenCalledTimes(2);
+    picker.mockClear();
+    chooseVideo();
+    await completeBasic();
+    expect(picker).not.toHaveBeenCalled();
+    expect(inspectCalls()).toHaveLength(1);
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    expect(provider.sign).not.toHaveBeenCalled();
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("keeps readable readiness labels on the circular initialization action", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue(walletProvider());
+    mockApi({ healthResponses: [503, 200] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+    const action = document.getElementById("analyze-btn");
+    expect(action.disabled).toBe(true);
+    expect(action.classList.contains("initializing")).toBe(true);
+    expect(action.querySelector("span").textContent).toBe("Initializing");
+    expect(action.querySelector("small").textContent).toBe("Analysis service waking up");
+    expect(action.querySelector(".initialization-dots").getAttribute("aria-hidden")).toBe("true");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(action.disabled).toBe(false);
+    expect(action.classList.contains("initializing")).toBe(false);
+    expect(action.querySelector("span").textContent).toBe("Inspect video");
+    expect(inspectCalls()).toHaveLength(0);
+  });
+
   it("starts with Connect and never requests accounts or balances on load, focus, or online", async () => {
     const provider = walletProvider();
     initMock.mockResolvedValue(provider);

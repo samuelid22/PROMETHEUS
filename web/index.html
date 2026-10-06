@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#090b14">
+<meta name="theme-color" content="#03050c">
 <title>Prometheus Beta — Creative video intelligence</title>
 <link rel="icon" href="/prometheus-mark.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/styles.css">
@@ -46,10 +46,9 @@
     <div class="upload-shell">
       <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="Choose a video file">
         <div class="upload-orb" aria-hidden="true">
-          <svg viewBox="0 0 32 32"><path d="M16 22V7M10.5 12.5 16 7l5.5 5.5M7 24.5h18"/></svg>
+          <svg viewBox="0 0 32 32"><path d="M16 6v20M6 16h20"/></svg>
         </div>
         <div class="dz-text"><strong>Drop your video here</strong><span>or choose a file from your device</span></div>
-        <span class="dropzone-action" aria-hidden="true">Choose video</span>
         <input id="file-input" type="file" accept="video/mp4,.mp4,.m4v,.mov,.webm" hidden>
       </div>
       <div class="upload-specs" aria-label="Supported formats"><span>MP4 · MOV · WebM</span><span>Up to 200 MB</span></div>
@@ -66,9 +65,13 @@
           <button id="file-clear" class="linkbtn" type="button">Choose a different video</button>
         </div>
       </div>
+      <button id="analyze-btn" class="primary analyze-action initializing" type="button" disabled>
+        <span>Initializing</span><small>Analysis service waking up</small>
+        <svg class="continue-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="m10 7 15 9-15 9 3-9-3-9Z"/><path d="M13 16h12"/></svg>
+        <span class="initialization-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      </button>
     </div>
 
-    <button id="analyze-btn" class="primary block analyze-action initializing" type="button" disabled><span>Initializing</span><small>Analysis service waking up</small></button>
     <button id="advanced-btn" class="secondary advanced-entry" type="button" disabled>Run free inspection first for advanced analysis</button>
     <div id="payment-status" class="payment-status" role="status" aria-live="polite">Connecting to Nimiq Pay&hellip;</div>
     <button id="retry-init-btn" class="secondary hidden" type="button">Retry initialization</button>
