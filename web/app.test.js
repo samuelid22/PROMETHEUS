@@ -212,6 +212,89 @@ describe("basic inspection and per-job payment", () => {
     vi.unstubAllEnvs();
   });
 
+  it("keeps the neon continue action outside the file-picker target", async () => {
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    mockApi();
+    await import("./app.js");
+    await flush();
+    const picker = vi.spyOn(document.getElementById("file-input"), "click");
+    const dropzone = document.getElementById("dropzone");
+    const action = document.getElementById("analyze-btn");
+    expect(dropzone.contains(action)).toBe(false);
+    expect(action.closest(".upload-shell")).not.toBeNull();
+    document.querySelector(".upload-orb").click();
+    expect(picker).toHaveBeenCalledTimes(1);
+    dropzone.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(picker).toHaveBeenCalledTimes(2);
+    picker.mockClear();
+    chooseVideo();
+    await completeBasic();
+    expect(picker).not.toHaveBeenCalled();
+    expect(inspectCalls()).toHaveLength(1);
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    expect(provider.sign).not.toHaveBeenCalled();
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+  });
+
+  it("ends the decorative entrance without requesting wallet access or analysis", async () => {
+    vi.useFakeTimers();
+    const provider = walletProvider();
+    initMock.mockResolvedValue(provider);
+    mockApi();
+    await import("./app.js");
+    expect(document.body.dataset.screen).toBe("upload");
+    expect(document.body.classList.contains("logo-entering")).toBe(true);
+    await vi.advanceTimersByTimeAsync(2400);
+    expect(document.body.classList.contains("logo-entering")).toBe(false);
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    expect(provider.sign).not.toHaveBeenCalled();
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    expect(inspectCalls()).toHaveLength(0);
+  });
+
+  it("uses existing processing/results screens to start and stop the eye state", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue(walletProvider());
+    mockApi({ jobStatuses: [
+      { state: "processing", stage: "Sampling representative frames" },
+      { state: "complete", stage: "Complete" },
+    ] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(2400);
+    chooseVideo();
+    document.getElementById("analyze-btn").click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(document.body.dataset.screen).toBe("processing");
+    expect(document.getElementById("phase-text").textContent).toBe("Extracting frames");
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(document.body.dataset.screen).toBe("results");
+    expect(inspectCalls()).toHaveLength(1);
+    document.getElementById("again-btn").click();
+    expect(document.body.dataset.screen).toBe("upload");
+    expect(document.getElementById("analyze-btn").disabled).toBe(true);
+  });
+
+  it("keeps readable readiness labels on the circular initialization action", async () => {
+    vi.useFakeTimers();
+    initMock.mockResolvedValue(walletProvider());
+    mockApi({ healthResponses: [503, 200] });
+    await import("./app.js");
+    await vi.advanceTimersByTimeAsync(0);
+    chooseVideo();
+    const action = document.getElementById("analyze-btn");
+    expect(action.disabled).toBe(true);
+    expect(action.classList.contains("initializing")).toBe(true);
+    expect(action.querySelector("span").textContent).toBe("Initializing");
+    expect(action.querySelector("small").textContent).toBe("Analysis service waking up");
+    expect(action.querySelector(".initialization-dots").getAttribute("aria-hidden")).toBe("true");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(action.disabled).toBe(false);
+    expect(action.classList.contains("initializing")).toBe(false);
+    expect(action.querySelector("span").textContent).toBe("Inspect video");
+    expect(inspectCalls()).toHaveLength(0);
+  });
+
   it("keeps TEST payment diagnostics hidden and inactive on ordinary production-style launches", async () => {
     initMock.mockResolvedValue(walletProvider());
     const fetchMock = mockApi();

@@ -337,6 +337,8 @@ function showScreen(name) {
   for (const key of Object.keys(screens)) {
     screens[key].classList.toggle("hidden", key !== name);
   }
+  // Decorative only: tied to the existing screen, never drives job/payment state.
+  document.body.dataset.screen = name;
   window.scrollTo(0, 0);
   screens[name].focus({ preventScroll: true });
 }
@@ -1673,6 +1675,8 @@ if (Object.values(screens).some((screen) => window.location.hash === `#${screen.
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
 }
 showScreen("upload");
+document.body.classList.add("logo-entering");
+setTimeout(() => document.body.classList.remove("logo-entering"), 2400);
 syncStartupState();
 if (!savedJobId) {
   sourceJobId = null;

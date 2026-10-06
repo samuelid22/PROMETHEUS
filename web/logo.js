@@ -29,7 +29,11 @@ class PrometheusLogo extends HTMLElement {
     mark.setAttribute("class", "brand-mark");
     mark.setAttribute("viewBox", "0 0 40 40");
     mark.setAttribute("aria-hidden", "true");
-    mark.innerHTML = '<path d="M20 4 36 33H4L20 4Z"/><circle cx="20" cy="24" r="4.5"/>';
+    // Original triangle/dot colors stay intact; the eye is decorative only.
+    mark.innerHTML = '<path class="logo-triangle" d="M20 4 36 33H4L20 4Z"/>'
+      + '<circle class="logo-dot" cx="20" cy="24" r="4.5"/>'
+      + '<g class="logo-eye"><path class="logo-eye-outline" d="M11 24Q20 14 29 24Q20 34 11 24Z"/>'
+      + '<g class="logo-pupil"><circle cx="20" cy="24" r="2.6"/></g></g>';
     this.appendChild(mark);
 
     if (!compact) {
