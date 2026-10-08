@@ -303,10 +303,55 @@ describe("basic inspection and per-job payment", () => {
     document.getElementById("wallet-connect").click();
     await flush();
     expect(document.getElementById("payment-diagnostic").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("payment-diagnostic-signer").textContent).toBe("");
+    expect(document.getElementById("payment-diagnostic-accounts").textContent).toBe("");
     document.getElementById("payment-diagnostic-arm").click();
     await flush();
     expect(document.getElementById("payment-diagnostic-report").textContent).toBe("");
     expect(fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC)).toHaveLength(2);
+  });
+
+  it("displays full approved addresses on TEST Connect without arming a capture or sending a payment", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    const fetchMock = mockApi();
+    await import("./app.js");
+    await flush();
+    expect(document.getElementById("payment-diagnostic-accounts").textContent).toBe("");
+    expect(provider.listAccounts).not.toHaveBeenCalled();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-signer").textContent).toBe(WALLET_ADDRESS);
+    expect(document.getElementById("payment-diagnostic-accounts").textContent).toBe(`${WALLET_ADDRESS}\n${SECOND_WALLET_ADDRESS}`);
+    expect(document.getElementById("payment-diagnostic-sender").textContent).toContain("Not captured yet");
+    expect(document.getElementById("payment-diagnostic-membership").textContent).toBe("Not determined yet");
+    expect(provider.listAccounts).toHaveBeenCalledTimes(1);
+    expect(provider.sendBasicTransactionWithData).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([url, options]) => url === WALLET_RPC && JSON.parse(options.body).method === "getTransactionByHash")).toBe(false);
+  });
+
+  it("shows the verified signer separately from a different approved address that actually pays", async () => {
+    vi.stubEnv("VITE_TEST_PAYMENT_DIAGNOSTICS", "true");
+    const provider = walletProvider({ listAccounts: vi.fn().mockResolvedValue([WALLET_ADDRESS, SECOND_WALLET_ADDRESS]) });
+    initMock.mockResolvedValue(provider);
+    mockApi({ authSigner: SECOND_WALLET_ADDRESS, transactionResponses: [diagnosticTransaction()] });
+    await import("./app.js");
+    await flush();
+    document.getElementById("wallet-connect").click();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-signer").textContent).toBe(SECOND_WALLET_ADDRESS);
+    document.getElementById("payment-diagnostic-arm").click();
+    await flush();
+    chooseVideo();
+    await completeBasic();
+    document.getElementById("upgrade-btn").click();
+    await flush();
+    await flush();
+    expect(document.getElementById("payment-diagnostic-signer").textContent).toBe(SECOND_WALLET_ADDRESS);
+    expect(document.getElementById("payment-diagnostic-sender").textContent).toBe(WALLET_ADDRESS);
+    expect(document.getElementById("payment-diagnostic-membership").textContent).toBe("Yes");
+    expect(provider.sendBasicTransactionWithData).toHaveBeenCalledTimes(1);
   });
 
   it("captures one opt-in TEST payment, exact hash, approved balances and backend observations without changing payments or the header", async () => {
@@ -355,7 +400,13 @@ describe("basic inspection and per-job payment", () => {
     expect(report).toContain("Backend source job matches quote: Yes");
     expect(report).toContain("Advanced job accepted after verification: advanced-basic-1");
     expect(report).not.toContain("token-1");
-    expect(report).not.toContain(WALLET_ADDRESS);
+    expect(report).toContain(`Verified signer (full): ${WALLET_ADDRESS}`);
+    expect(report).toContain(`Approved address 2 (full): ${SECOND_WALLET_ADDRESS}`);
+    expect(report).toContain(`Payment sender (full): ${WALLET_ADDRESS}`);
+    expect(document.getElementById("payment-diagnostic-signer").textContent).toBe(WALLET_ADDRESS);
+    expect(document.getElementById("payment-diagnostic-accounts").textContent).toBe(`${WALLET_ADDRESS}\n${SECOND_WALLET_ADDRESS}`);
+    expect(document.getElementById("payment-diagnostic-sender").textContent).toBe(WALLET_ADDRESS);
+    expect(document.getElementById("payment-diagnostic-membership").textContent).toBe("Yes");
     expect(document.getElementById("wallet-connect").textContent).toBe("✓ 140.00 NIM · NQ07…0000");
     expect(provider.sendBasicTransactionWithData).toHaveBeenCalledExactlyOnceWith({ recipient: MERCHANT_ADDRESS, value: 1_000_000, data: "prometheus:quote-1" });
     const rpcCalls = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).map(([, options]) => JSON.parse(options.body));
@@ -393,6 +444,8 @@ describe("basic inspection and per-job payment", () => {
     document.getElementById("upgrade-btn").click();
     await flush();
     expect(document.getElementById("payment-diagnostic-report").textContent).toContain("Sender is in approved-address set: No");
+    expect(document.getElementById("payment-diagnostic-sender").textContent).toBe(SECOND_WALLET_ADDRESS);
+    expect(document.getElementById("payment-diagnostic-membership").textContent).toBe("No");
     expect(document.getElementById("payment-diagnostic-report").textContent).toContain("No unrelated address was queried");
     const reads = fetchMock.mock.calls.filter(([url]) => url === WALLET_RPC).map(([, options]) => JSON.parse(options.body)).filter((call) => call.method === "getAccountByAddress");
     expect(reads.every((call) => call.params[0] === WALLET_ADDRESS)).toBe(true);
@@ -509,6 +562,9 @@ describe("basic inspection and per-job payment", () => {
     await flush();
     expect(document.getElementById("payment-diagnostic-report").textContent).toBe("");
     expect(document.getElementById("payment-diagnostic").classList.contains("hidden")).toBe(true);
+    expect(document.getElementById("payment-diagnostic-signer").textContent).toBe("");
+    expect(document.getElementById("payment-diagnostic-accounts").textContent).toBe("");
+    expect(document.getElementById("payment-diagnostic-sender").textContent).toBe("");
     expect(document.getElementById("wallet-connect").textContent).toBe("Connect");
   });
 

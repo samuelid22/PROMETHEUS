@@ -32,6 +32,13 @@
         <section id="payment-diagnostic" class="hidden" aria-labelledby="payment-diagnostic-heading">
           <h2 id="payment-diagnostic-heading">TEST-only payment diagnostic</h2>
           <p class="wallet-note">Capture one payment you approve yourself. Public transaction details and balances stay in this page's memory. Reads use the existing Testnet RPC only.</p>
+          <dl class="wallet-details">
+            <dt>Verified signer at Connect</dt><dd id="payment-diagnostic-signer" class="wallet-address"></dd>
+            <dt>Approved addresses at Connect</dt><dd id="payment-diagnostic-accounts" class="wallet-address payment-diagnostic-addresses"></dd>
+            <dt>Payment sender from Testnet RPC</dt><dd id="payment-diagnostic-sender" class="wallet-address"></dd>
+            <dt>Sender in approved-address set</dt><dd id="payment-diagnostic-membership"></dd>
+          </dl>
+          <p class="wallet-note">The signer proves control of that address only. Approved addresses and the payment sender are shown separately. This does not prove automatic address rotation.</p>
           <button id="payment-diagnostic-arm" class="secondary" type="button">Capture next TEST payment</button>
           <p id="payment-diagnostic-status" class="wallet-message" role="status" aria-live="polite"></p>
           <pre id="payment-diagnostic-report" class="payment-diagnostic-report"></pre>

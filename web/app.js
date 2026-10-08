@@ -75,6 +75,10 @@ const els = {
   walletDisconnect: document.getElementById("wallet-disconnect"),
   walletDisconnectNote: document.getElementById("wallet-disconnect-note"),
   paymentDiagnostic: document.getElementById("payment-diagnostic"),
+  paymentDiagnosticSigner: document.getElementById("payment-diagnostic-signer"),
+  paymentDiagnosticAccounts: document.getElementById("payment-diagnostic-accounts"),
+  paymentDiagnosticSender: document.getElementById("payment-diagnostic-sender"),
+  paymentDiagnosticMembership: document.getElementById("payment-diagnostic-membership"),
   paymentDiagnosticArm: document.getElementById("payment-diagnostic-arm"),
   paymentDiagnosticStatus: document.getElementById("payment-diagnostic-status"),
   paymentDiagnosticReport: document.getElementById("payment-diagnostic-report"),
@@ -410,6 +414,7 @@ function renderWallet() {
   els.walletDisconnect.classList.toggle("hidden", !walletAddress);
   els.walletDisconnectNote.classList.toggle("hidden", !walletAddress);
   els.paymentDiagnostic.classList.toggle("hidden", !PAYMENT_DIAGNOSTICS_ENABLED || !walletAddress || walletConnecting);
+  renderPaymentDiagnostic();
 }
 
 function formatWalletBalance(luna) {
@@ -493,6 +498,10 @@ function shortDiagnosticAddress(address) {
   return compact ? `${compact.slice(0, 4)}…${compact.slice(-4)}` : "Unavailable";
 }
 
+function fullDiagnosticAddress(address) {
+  return diagnosticAddress(address)?.match(/.{4}/g).join(" ") || "Unavailable";
+}
+
 async function diagnosticSnapshot(accounts) {
   const started = new Date().toISOString();
   const unique = new Map();
@@ -517,6 +526,18 @@ function diagnosticAmount(luna) {
 
 function renderPaymentDiagnostic() {
   const diagnostic = paymentDiagnostic;
+  const accounts = PAYMENT_DIAGNOSTICS_ENABLED && walletAddress
+    ? (diagnostic?.accounts || diagnosticAccounts) : [];
+  const signer = PAYMENT_DIAGNOSTICS_ENABLED && walletAddress
+    ? (diagnostic?.selected || walletAddress) : null;
+  const sender = PAYMENT_DIAGNOSTICS_ENABLED && walletAddress
+    ? diagnosticAddress(diagnostic?.transaction?.sender) : null;
+  els.paymentDiagnosticSigner.textContent = signer ? fullDiagnosticAddress(signer) : "";
+  els.paymentDiagnosticAccounts.textContent = accounts.map(fullDiagnosticAddress).join("\n");
+  els.paymentDiagnosticSender.textContent = signer
+    ? (sender ? fullDiagnosticAddress(sender) : "Not captured yet. Capture your next TEST payment below.") : "";
+  els.paymentDiagnosticMembership.textContent = signer
+    ? (sender ? (accounts.some((account) => diagnosticAddress(account) === sender) ? "Yes" : "No") : "Not determined yet") : "";
   els.paymentDiagnosticArm.disabled = Boolean(diagnostic && ["reading", "armed", "awaiting-hash", "tracking"].includes(diagnostic.phase));
   els.paymentDiagnosticStatus.textContent = diagnostic?.status || "Open this diagnostic before one fresh 10 NIM Advanced Analysis payment.";
   els.paymentDiagnosticCopy.disabled = !diagnostic;
@@ -527,6 +548,8 @@ function renderPaymentDiagnostic() {
   const lines = ["Prometheus TEST-only payment diagnostic", "Network balance source: TESTNET (TestAlbatross)",
     `RPC: ${WALLET_TESTNET_RPC_URL}`, `Returned addresses from Connect: ${diagnostic.accounts.length}`,
     `Selected by Prometheus: ${shortDiagnosticAddress(diagnostic.selected)}`,
+    `Verified signer (full): ${fullDiagnosticAddress(diagnostic.selected)}`,
+    ...diagnostic.accounts.map((account, index) => `Approved address ${index + 1} (full): ${fullDiagnosticAddress(account)}`),
     `Header at capture: ${diagnostic.header}`, "Testnet on-chain balance snapshots (not atomic):"];
   for (const [name, snapshot] of [["Before", diagnostic.before], ["After inclusion", diagnostic.after]]) {
     if (!snapshot) continue;
@@ -547,6 +570,7 @@ function renderPaymentDiagnostic() {
     const sender = diagnosticAddress(transaction.sender);
     const belongs = sender && diagnostic.before?.entries.some((entry) => entry.address === sender);
     lines.push(`Transaction state: ${transaction.state}`, `Sender: ${shortDiagnosticAddress(sender)}`,
+      `Payment sender (full): ${fullDiagnosticAddress(sender)}`,
       `Sender is in approved-address set: ${sender ? (belongs ? "Yes" : "No") : "Unavailable"}`,
       `Recipient: ${shortDiagnosticAddress(transaction.recipient)}`, `Value: ${diagnosticAmount(transaction.value)}`,
       `Fee: ${diagnosticAmount(transaction.fee)}`, `Memo matches quote: ${transaction.memoMatches ? "Yes" : "No / unavailable"}`,
